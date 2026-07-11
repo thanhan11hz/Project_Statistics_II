@@ -176,7 +176,7 @@ safe_condition_numbers <- function(x, lambda, tol = 1e-10) {
 
 ## 1A. Target and predictors
 
-```{r data-configuration, eval=FALSE}
+```{r data-configuration}
 config <- if (group_number %% 2L == 1L) {
   list(
     file = "fat.csv",
