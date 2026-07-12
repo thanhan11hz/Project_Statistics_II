@@ -628,6 +628,16 @@ knitr::kable(
     transformation_record,
     caption = "Final training-derived transformation rules"
 )
+
+# export the tibble frames to a csv file
+readr::write_csv(
+  skewness_table,
+  file = "../data/tables/skewness_table.csv"
+)
+readr::write_csv(
+    transformation_record,
+    file = "../data/tables/transformation_record.csv"
+)
 ```
 
 *Report seeds, dimensions, scaling, folds, and leakage safeguards.*
