@@ -61,10 +61,13 @@ library(glmnet)
 library(broom)
 library(knitr)
 
-group_number <- as.integer(params$group_number)
-if (length(group_number) != 1L || is.na(group_number) || group_number < 1L) {
-  stop("Set params$group_number to your assigned positive group number.")
-}
+# hardcode group number bc somehow the object group_number in param is not found
+group_number <- 2
+
+# group_number <- as.integer(params$group_number)
+# if (length(group_number) != 1L || is.na(group_number) || group_number < 1L) {
+#   stop("Set params$group_number to your assigned positive group number.")
+# }
 
 seeds <- list(
   split = 240200L + group_number,
@@ -199,27 +202,432 @@ if (anyNA(analysis_data)) stop("Declare a training-only missing-value plan.")
 if (!all(vapply(analysis_data, is.numeric, logical(1)))) {
   stop("The assigned response and predictors must be numeric.")
 }
+
+# csv output for preflight check
+cat("File:", config$file, "\n")
+cat("Response:", config$response, "\n")
+cat("Rows:", nrow(data_raw), "\n")
+cat("Columns:", ncol(data_raw), "\n")
+
+# basic checks 
+integrity_summary <- tibble::tibble(
+    variable = names(data_raw),
+    type = vapply(
+        data_raw,
+        function(x) class(x)[1],
+        character(1)
+    ),
+    missing = vapply(
+        data_raw,
+        function(x) sum(is.na(x)),
+        integer(1)
+    ),
+    unique_values = vapply(
+        data_raw,
+        function(x) dplyr::n_distinct(
+            x,
+            na.rm = TRUE
+        ),
+        integer(1)
+    )
+)
+
+knitr::kable(
+    integrity_summary,
+    caption = "Basic CSV integrity checks"
+)
+
+# find missing values
+missing_response_count <- sum(
+    is.na(analysis_data[[config$response]])
+)
+
+cat(
+    "Rows with missing responses:",
+    missing_response_count,
+    "\n"
+)
+
+analysis_data <- analysis_data |>
+    filter(
+        !is.na(.data[[config$response]])
+    )
 ```
 
 *Define the prediction task and justify every exclusion.*
 
 ## 1B. Split and train-only preprocessing
 
-```{r split-and-scale, eval=FALSE}
-split <- split_rows(nrow(analysis_data), seed = seeds$split)
+```{r split-and-scale}
+# split the data 80/20 into training  and test sets, using the group-specific seed
+
+split <- split_rows(
+    n = nrow(analysis_data),
+    train_prop = 0.80,
+    seed = seeds$split
+)
+
 train_id <- split$train
 test_id <- split$test
 
-x_raw <- as.matrix(analysis_data[, predictors, drop = FALSE])
-y_raw <- analysis_data[[config$response]]
+stopifnot(
+    length(intersect(train_id, test_id)) == 0L
+)
 
-x_prep <- fit_scaler(x_raw[train_id, , drop = FALSE])
-x_train <- apply_scaler(x_raw[train_id, , drop = FALSE], x_prep)
-x_test <- apply_scaler(x_raw[test_id, , drop = FALSE], x_prep)
-y_train <- y_raw[train_id]
-y_test <- y_raw[test_id]
 
-foldid <- make_foldid(nrow(x_train), k = 5L, seed = seeds$cv)
+# make raw training and test predictor matrices and response vectors, without any preprocessing yet
+
+x_train_raw <- analysis_data[
+    train_id,
+    predictors,
+    drop = FALSE
+]
+
+x_test_raw <- analysis_data[
+    test_id,
+    predictors,
+    drop = FALSE
+]
+
+y_train <- analysis_data[
+    train_id,
+    config$response,
+    drop = TRUE
+]
+
+# dont touch this 
+y_test_locked <- analysis_data[
+    test_id,
+    config$response,
+    drop = TRUE
+]
+
+
+# start calc. the skewness of each continuous predictor in the training set, to identify which ones may need transformation
+sample_skewness <- function(x) {
+  # check if x is numeric 
+    x <- x[is.finite(x)]
+    n <- length(x)
+
+    if (n < 3L) {
+        return(NA_real_)
+    }
+    # standardize x
+    standard_deviation <- stats::sd(x)
+
+    if (
+        !is.finite(standard_deviation) ||
+        standard_deviation == 0
+    ) {
+        return(NA_real_)
+    }
+
+    standardized <- (
+        x - mean(x)
+    ) / standard_deviation
+
+    n / (
+        (n - 1) * (n - 2)
+    ) * sum(standardized^3)
+}
+
+
+# find continuous predictors: numeric and more than 5 unique values
+continuous_predictors <- predictors[
+    vapply(
+        x_train_raw,
+        function(x) {
+            is.numeric(x) &&
+                dplyr::n_distinct(
+                    x,
+                    na.rm = TRUE
+                ) > 5L
+        },
+        logical(1)
+    )
+]
+
+noncontinuous_predictors <- setdiff(
+    predictors,
+    continuous_predictors
+)
+
+
+# start calc. skewness to see if any continuous predictors are strongly skewed and may need trans.
+
+# function to safely compute the minimum of a vector, returning NA if no finite values exist
+safe_minimum <- function(x) {
+    x <- x[is.finite(x)]
+
+    if (length(x) == 0L) {
+        return(NA_real_)
+    }
+
+    min(x)
+}
+
+  # make a skewness table for continuous predictors, including minimum, skewness, absolute skewness, and assessment of skewness level (important for analysis later on)
+skewness_table <- tibble::tibble(
+    variable = continuous_predictors,
+    minimum = vapply(
+        x_train_raw[continuous_predictors],
+        safe_minimum,
+        numeric(1)
+    ),
+    skewness = vapply(
+        x_train_raw[continuous_predictors],
+        sample_skewness,
+        numeric(1)
+    )
+) |>
+# here we define the absolute skewness and assessment of skewness level based on the absolute skewness value
+    dplyr::mutate(
+        absolute_skewness = abs(skewness),
+        assessment = dplyr::case_when(
+            is.na(absolute_skewness) ~
+                "Unavailable",
+            absolute_skewness < 0.5 ~
+                "Approximately symmetric",
+            absolute_skewness < 1 ~
+                "Moderately skewed",
+            TRUE ~
+                "Strongly skewed"
+        )
+    ) |>
+    dplyr::arrange(
+        dplyr::desc(absolute_skewness)
+    )
+
+knitr::kable(
+    skewness_table,
+    digits = 3,
+    caption = "Training-set predictor skewness"
+)
+
+
+# find the predictors that are already logarithmic to avoid transforming them again
+already_logged <- if (config$response == "lpsa") {
+    intersect(
+        predictors,
+        c(
+            "lcavol",
+            "lweight",
+            "lbph",
+            "lcp"
+        )
+    )
+} else {
+    character(0)
+}
+
+
+# ---------------------------------------------------------
+# Select predictors for log1p transformation
+#
+# Rule:
+# - continuous;
+# - skewness >= 1;
+# - nonnegative;
+# - not already logarithmic.
+# ---------------------------------------------------------
+
+log1p_variables <- skewness_table |>
+    dplyr::filter(
+        !is.na(skewness),
+        skewness >= 1,
+        !is.na(minimum),
+        minimum >= 0,
+        !variable %in% already_logged
+    ) |>
+    dplyr::pull(variable)
+
+cat(
+    "Predictors selected for log1p transformation:\n"
+)
+
+if (length(log1p_variables) == 0L) {
+    cat("None\n")
+} else {
+    print(log1p_variables)
+}
+
+
+# validate that the test set does not contain negative values for any log1p variables, which would be invalid for the transformation
+
+if (length(log1p_variables) > 0L) {
+    invalid_test_domains <- vapply(
+        x_test_raw[log1p_variables],
+        function(x) {
+            any(
+                x < 0,
+                na.rm = TRUE
+            )
+        },
+        logical(1)
+    )
+
+    if (any(invalid_test_domains)) {
+        stop(
+            "Negative test values found for log1p variables: ",
+            paste(
+                names(invalid_test_domains)[
+                    invalid_test_domains
+                ],
+                collapse = ", "
+            )
+        )
+    }
+}
+
+
+# create transformed training and test predictor matrices, applying log1p to the selected variables
+
+x_train_transformed <- x_train_raw
+x_test_transformed <- x_test_raw
+
+for (variable in log1p_variables) {
+    x_train_transformed[[variable]] <- log1p(
+        x_train_raw[[variable]]
+    )
+
+    x_test_transformed[[variable]] <- log1p(
+        x_test_raw[[variable]]
+    )
+}
+
+
+# compare the skewness before and after transformation for the selected variables, to assess the effectiveness of the log1p transformation (also important for analysis later on)
+if (length(log1p_variables) > 0L) {
+    transformation_comparison <- tibble::tibble(
+        variable = log1p_variables,
+        original_skewness = vapply(
+            x_train_raw[log1p_variables],
+            sample_skewness,
+            numeric(1)
+        ),
+        transformed_skewness = vapply(
+            x_train_transformed[log1p_variables],
+            sample_skewness,
+            numeric(1)
+        )
+    ) |>
+        dplyr::mutate(
+            absolute_reduction =
+                abs(original_skewness) -
+                abs(transformed_skewness)
+        )
+
+    print(
+        knitr::kable(
+            transformation_comparison,
+            digits = 3,
+            caption = paste(
+                "Training-set skewness before",
+                "and after transformation"
+            )
+        )
+    )
+}
+
+
+# calc. the median of each predictor in the training set, to use for imputation of missing values in both training and test sets (just to be extra sure - but I checked the data after and looks like this can be dropped)
+training_medians <- vapply(
+    x_train_transformed,
+    function(x) {
+        stats::median(
+            x,
+            na.rm = TRUE
+        )
+    },
+    numeric(1)
+)
+
+invalid_medians <- !is.finite(training_medians)
+
+if (any(invalid_medians)) {
+    stop(
+        "No usable training values for predictors: ",
+        paste(
+            names(training_medians)[invalid_medians],
+            collapse = ", "
+        )
+    )
+}
+
+impute_with_medians <- function(data, medians) {
+    result <- data
+
+    for (variable in names(medians)) {
+        missing_positions <- is.na(
+            result[[variable]]
+        )
+
+        result[[variable]][missing_positions] <-
+            medians[[variable]]
+    }
+
+    result
+}
+
+x_train_imputed <- impute_with_medians(
+    x_train_transformed,
+    training_medians
+)
+
+x_test_imputed <- impute_with_medians(
+    x_test_transformed,
+    training_medians
+)
+
+stopifnot(
+    !anyNA(x_train_imputed),
+    !anyNA(x_test_imputed)
+)
+
+
+# fit the scaler on the training set and apply it to both training and test sets
+
+x_prep <- fit_scaler(
+    x_train_imputed
+)
+
+x_train <- apply_scaler(
+    x_train_imputed,
+    x_prep
+)
+
+x_test <- apply_scaler(
+    x_test_imputed,
+    x_prep
+)
+
+
+# create foldid for cross-validation, using the group-specific seed (same as original code, but now we are using the transformed and scaled x_train from the previous steps)
+foldid <- make_foldid(
+    n = nrow(x_train),
+    k = 5L,
+    seed = seeds$cv
+)
+
+cat("\nFold sizes:\n")
+print(table(foldid))
+
+
+# summarize the final transformation rules for each predictor, indicating whether log1p was applied or not
+
+transformation_record <- tibble::tibble(
+    variable = predictors,
+    transformation = dplyr::if_else(
+        predictors %in% log1p_variables,
+        "log1p(x)",
+        "none"
+    )
+)
+
+knitr::kable(
+    transformation_record,
+    caption = "Final training-derived transformation rules"
+)
 ```
 
 *Report seeds, dimensions, scaling, folds, and leakage safeguards.*
