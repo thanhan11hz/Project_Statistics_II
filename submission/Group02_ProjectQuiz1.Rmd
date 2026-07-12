@@ -634,8 +634,213 @@ knitr::kable(
 
 ## 1C. Training-data exploration
 
-```{r training-eda, eval=FALSE}
+```{r training-eda, fig.width=7, fig.height=5}
 # Use analysis_data[train_id, ] only. Add focused plots and summaries.
+
+# add skewness plots from 1B for the selected log1p variables, showing the distribution before and after transformation
+
+# 1. training response distribution
+response_plot_data <- tibble::tibble(
+    response = y_train
+)
+
+ggplot2::ggplot(
+    response_plot_data,
+    ggplot2::aes(x = response)
+) +
+    ggplot2::geom_histogram(
+        bins = 20,
+        fill = "steelblue",
+        color = "white"
+    ) +
+    ggplot2::labs(
+        title = paste(
+            "Training distribution of",
+            config$response
+        ),
+        x = config$response,
+        y = "Count"
+    ) +
+    ggplot2::theme_minimal()
+
+  ggplot2::ggsave(
+    filename = paste0(
+        "../data/training_distribution_",
+        config$response,
+        ".png"
+    ),
+    width = 7,
+    height = 5,
+    units = "in",
+    dpi = 300
+  )
+
+# 2. plot discrete predictors as bar plots, showing the count of each category in the training set
+discrete_predictors <- intersect(
+    c(
+        "svi",
+        "gleason"
+    ),
+    predictors
+)
+
+discrete_plot_data <- x_train_raw |>
+    dplyr::select(
+        dplyr::all_of(discrete_predictors)
+    ) |>
+    tidyr::pivot_longer(
+        cols = dplyr::everything(),
+        names_to = "variable",
+        values_to = "value"
+    ) |>
+    dplyr::count(
+        variable,
+        value,
+        name = "count"
+    )
+
+discrete_predictor_plot <- ggplot2::ggplot(
+    discrete_plot_data,
+    ggplot2::aes(
+        x = factor(value),
+        y = count
+    )
+) +
+    ggplot2::geom_col(
+        fill = "steelblue",
+        color = "white"
+    ) +
+    ggplot2::facet_wrap(
+        ~ variable,
+        scales = "free_x"
+    ) +
+    ggplot2::labs(
+        title = "Discrete predictor distributions",
+        subtitle = "Training observations only",
+        x = "Value",
+        y = "Count"
+    ) +
+    ggplot2::theme_minimal()
+
+discrete_predictor_plot
+
+  ggplot2::ggsave(
+    filename = "../data/original_discrete_predictor_distributions.png",
+    width = 7,
+    height = 5,
+    units = "in",
+    dpi = 300
+  )
+
+# 3. original predictor distributions for continuous predictors, before any transformation
+
+original_plot_data <- x_train_raw |>
+    dplyr::select(
+        dplyr::all_of(continuous_predictors)
+    ) |>
+    tidyr::pivot_longer(
+        cols = dplyr::everything(),
+        names_to = "variable",
+        values_to = "value"
+    )
+
+ggplot2::ggplot(
+    original_plot_data,
+    ggplot2::aes(x = value)
+) +
+    ggplot2::geom_histogram(
+        bins = 20,
+        fill = "steelblue",
+        color = "white"
+    ) +
+    ggplot2::facet_wrap(
+        ~ variable,
+        scales = "free",
+        ncol = 3
+    ) +
+    ggplot2::labs(
+        title = "Original predictor distributions",
+        subtitle = "Training observations only",
+        x = NULL,
+        y = "Count"
+    ) +
+    ggplot2::theme_minimal()
+
+    ggplot2::ggsave(
+    filename = "../data/original_continuous_predictor_distributions.png",
+    width = 7,
+    height = 5,
+    units = "in",
+    dpi = 300
+)
+# 4. comparison of distributions before and after log1p transformation for the selected variables
+
+if (length(log1p_variables) > 0L) {
+    before_plot_data <- x_train_raw |>
+        dplyr::select(
+            dplyr::all_of(log1p_variables)
+        ) |>
+        tidyr::pivot_longer(
+            cols = dplyr::everything(),
+            names_to = "variable",
+            values_to = "value"
+        ) |>
+        dplyr::mutate(
+            version = "Original"
+        )
+
+    after_plot_data <- x_train_transformed |>
+        dplyr::select(
+            dplyr::all_of(log1p_variables)
+        ) |>
+        tidyr::pivot_longer(
+            cols = dplyr::everything(),
+            names_to = "variable",
+            values_to = "value"
+        ) |>
+        dplyr::mutate(
+            version = "log1p transformed"
+        )
+
+    comparison_plot_data <- dplyr::bind_rows(
+        before_plot_data,
+        after_plot_data
+    )
+
+    print(
+        ggplot2::ggplot(
+            comparison_plot_data,
+            ggplot2::aes(x = value)
+        ) +
+            ggplot2::geom_histogram(
+                bins = 20,
+                fill = "steelblue",
+                color = "white"
+            ) +
+            ggplot2::facet_grid(
+                variable ~ version,
+                scales = "free"
+            ) +
+            ggplot2::labs(
+                title = paste(
+                    "Predictor distributions before",
+                    "and after transformation"
+                ),
+                subtitle = "Training observations only",
+                x = NULL,
+                y = "Count"
+            ) +
+            ggplot2::theme_minimal()
+    )
+}
+
+  ggplot2::ggsave(
+    filename = "../data/after_transformation_comparison.png",
+    width = 7,
+    height = 5,
+    units = "in",
+    dpi = 300
+  )
 ```
 
 *Interpret multicollinearity, one anomaly, and the question regularization will address.*
