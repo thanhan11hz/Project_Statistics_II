@@ -198,7 +198,6 @@ data_raw <- read.csv(find_exam_data(config$file), check.names = FALSE)
 predictors <- setdiff(names(data_raw), config$excluded)
 analysis_data <- data_raw[, c(config$response, predictors), drop = FALSE]
 
-if (anyNA(analysis_data)) stop("Declare a training-only missing-value plan.")
 if (!all(vapply(analysis_data, is.numeric, logical(1)))) {
   stop("The assigned response and predictors must be numeric.")
 }
@@ -236,22 +235,6 @@ knitr::kable(
     integrity_summary,
     caption = "Basic CSV integrity checks"
 )
-
-# find missing values
-missing_response_count <- sum(
-    is.na(analysis_data[[config$response]])
-)
-
-cat(
-    "Rows with missing responses:",
-    missing_response_count,
-    "\n"
-)
-
-analysis_data <- analysis_data |>
-    filter(
-        !is.na(.data[[config$response]])
-    )
 ```
 
 *Define the prediction task and justify every exclusion.*
@@ -259,8 +242,7 @@ analysis_data <- analysis_data |>
 ## 1B. Split and train-only preprocessing
 
 ```{r split-and-scale}
-# split the data 80/20 into training  and test sets, using the group-specific seed
-
+# Split once using the declared group-specific seed.
 split <- split_rows(
     n = nrow(analysis_data),
     train_prop = 0.80,
@@ -274,9 +256,7 @@ stopifnot(
     length(intersect(train_id, test_id)) == 0L
 )
 
-
-# make raw training and test predictor matrices and response vectors, without any preprocessing yet
-
+# Preserve unprocessed train/test objects for training-only exploration.
 x_train_raw <- analysis_data[
     train_id,
     predictors,
@@ -289,30 +269,142 @@ x_test_raw <- analysis_data[
     drop = FALSE
 ]
 
-y_train <- analysis_data[
+y_train_raw <- analysis_data[
     train_id,
     config$response,
     drop = TRUE
 ]
 
-# dont touch this 
+# Keep the supplied holdout response locked on its original lpsa scale.
 y_test_locked <- analysis_data[
     test_id,
     config$response,
     drop = TRUE
 ]
 
+# Apply the fixed transformation map to predictors. pgg45 contains zeros,
+# so log1p(x) is used instead of undefined log(0).
+transform_predictors <- function(x) {
+    transformed <- x
+    transformed$age <- x$age^2
+    transformed$lbph <- expm1(x$lbph)
+    transformed$lcavol <- x$lcavol
+    transformed$lcp <- expm1(x$lcp)
+    transformed$lweight <- x$lweight
+    transformed$pgg45 <- log1p(x$pgg45)
+    transformed$gleason <- x$gleason
+    transformed$svi <- x$svi
+    transformed
+}
 
-# start calc. the skewness of each continuous predictor in the training set, to identify which ones may need transformation
+x_train_transformed <- transform_predictors(x_train_raw)
+x_test_transformed <- transform_predictors(x_test_raw)
+
+# Transform the training response from log(PSA) to sqrt(PSA).
+# Reuse this function on y_test_locked only in the final evaluation chunk.
+transform_response <- function(y) {
+    exp(y / 2)
+}
+
+y_train <- transform_response(y_train_raw)
+
+# Fit preprocessing constants on transformed training predictors only.
+x_prep <- fit_scaler(
+    x_train_transformed
+)
+
+x_train <- apply_scaler(
+    x_train_transformed,
+    x_prep
+)
+
+x_test <- apply_scaler(
+    x_test_transformed,
+    x_prep
+)
+
+# Create one shared five-fold assignment for all training comparisons.
+foldid <- make_foldid(
+    n = nrow(x_train),
+    k = 5L,
+    seed = seeds$cv
+)
+
+cat("\nFold sizes:\n")
+print(table(foldid))
+
+# Record the fixed rules used by the pipeline.
+transformation_record <- tibble::tibble(
+    variable = c(predictors, config$response),
+    role = c(rep("predictor", length(predictors)), "response")
+) |>
+    dplyr::mutate(
+        transformation = dplyr::case_when(
+            variable == "age" ~ "x^2",
+            variable == "lbph" ~ "exp(x) - 1",
+            variable == "lcavol" ~ "none",
+            variable == "lcp" ~ "exp(x) - 1",
+            variable == "lweight" ~ "none",
+            variable == "pgg45" ~ "log1p(x)",
+            variable == "gleason" ~ "none",
+            variable == "svi" ~ "none",
+            variable == "lpsa" ~ "exp(x / 2) = sqrt(PSA)",
+            TRUE ~ "none"
+        )
+    )
+
+knitr::kable(
+    transformation_record,
+    caption = "Fixed transformation rules"
+)
+```
+
+*Report seeds, dimensions, scaling, folds, and leakage safeguards.*
+
+## 1C. Training-data exploration
+
+All exploratory calculations in this section use training observations only. The holdout response remains locked.
+
+```{r training-eda, fig.width=9, fig.height=6}
+# ---------------------------------------------------------
+# Output directories
+# ---------------------------------------------------------
+
+plot_directory <- file.path(
+    "data",
+    "plots"
+)
+
+table_directory <- file.path(
+    "data",
+    "tables"
+)
+
+dir.create(
+    plot_directory,
+    recursive = TRUE,
+    showWarnings = FALSE
+)
+
+dir.create(
+    table_directory,
+    recursive = TRUE,
+    showWarnings = FALSE
+)
+
+
+# ---------------------------------------------------------
+# Helper function: sample skewness
+# ---------------------------------------------------------
+
 sample_skewness <- function(x) {
-  # check if x is numeric 
     x <- x[is.finite(x)]
     n <- length(x)
 
     if (n < 3L) {
         return(NA_real_)
     }
-    # standardize x
+
     standard_deviation <- stats::sd(x)
 
     if (
@@ -332,7 +424,10 @@ sample_skewness <- function(x) {
 }
 
 
-# find continuous predictors: numeric and more than 5 unique values
+# ---------------------------------------------------------
+# Identify continuous and discrete predictors
+# ---------------------------------------------------------
+
 continuous_predictors <- predictors[
     vapply(
         x_train_raw,
@@ -347,345 +442,6 @@ continuous_predictors <- predictors[
     )
 ]
 
-noncontinuous_predictors <- setdiff(
-    predictors,
-    continuous_predictors
-)
-
-
-# start calc. skewness to see if any continuous predictors are strongly skewed and may need trans.
-
-# function to safely compute the minimum of a vector, returning NA if no finite values exist
-safe_minimum <- function(x) {
-    x <- x[is.finite(x)]
-
-    if (length(x) == 0L) {
-        return(NA_real_)
-    }
-
-    min(x)
-}
-
-  # make a skewness table for continuous predictors, including minimum, skewness, absolute skewness, and assessment of skewness level (important for analysis later on)
-skewness_table <- tibble::tibble(
-    variable = continuous_predictors,
-    minimum = vapply(
-        x_train_raw[continuous_predictors],
-        safe_minimum,
-        numeric(1)
-    ),
-    skewness = vapply(
-        x_train_raw[continuous_predictors],
-        sample_skewness,
-        numeric(1)
-    )
-) |>
-# here we define the absolute skewness and assessment of skewness level based on the absolute skewness value
-    dplyr::mutate(
-        absolute_skewness = abs(skewness),
-        assessment = dplyr::case_when(
-            is.na(absolute_skewness) ~
-                "Unavailable",
-            absolute_skewness < 0.5 ~
-                "Approximately symmetric",
-            absolute_skewness < 1 ~
-                "Moderately skewed",
-            TRUE ~
-                "Strongly skewed"
-        )
-    ) |>
-    dplyr::arrange(
-        dplyr::desc(absolute_skewness)
-    )
-
-knitr::kable(
-    skewness_table,
-    digits = 3,
-    caption = "Training-set predictor skewness"
-)
-
-
-# find the predictors that are already logarithmic to avoid transforming them again
-already_logged <- if (config$response == "lpsa") {
-    intersect(
-        predictors,
-        c(
-            "lcavol",
-            "lweight",
-            "lbph",
-            "lcp"
-        )
-    )
-} else {
-    character(0)
-}
-
-
-# ---------------------------------------------------------
-# Select predictors for log1p transformation
-#
-# Rule:
-# - continuous;
-# - skewness >= 1;
-# - nonnegative;
-# - not already logarithmic.
-# ---------------------------------------------------------
-
-log1p_variables <- skewness_table |>
-    dplyr::filter(
-        !is.na(skewness),
-        skewness >= 1,
-        !is.na(minimum),
-        minimum >= 0,
-        !variable %in% already_logged
-    ) |>
-    dplyr::pull(variable)
-
-cat(
-    "Predictors selected for log1p transformation:\n"
-)
-
-if (length(log1p_variables) == 0L) {
-    cat("None\n")
-} else {
-    print(log1p_variables)
-}
-
-
-# validate that the test set does not contain negative values for any log1p variables, which would be invalid for the transformation
-
-if (length(log1p_variables) > 0L) {
-    invalid_test_domains <- vapply(
-        x_test_raw[log1p_variables],
-        function(x) {
-            any(
-                x < 0,
-                na.rm = TRUE
-            )
-        },
-        logical(1)
-    )
-
-    if (any(invalid_test_domains)) {
-        stop(
-            "Negative test values found for log1p variables: ",
-            paste(
-                names(invalid_test_domains)[
-                    invalid_test_domains
-                ],
-                collapse = ", "
-            )
-        )
-    }
-}
-
-
-# create transformed training and test predictor matrices, applying log1p to the selected variables
-
-x_train_transformed <- x_train_raw
-x_test_transformed <- x_test_raw
-
-for (variable in log1p_variables) {
-    x_train_transformed[[variable]] <- log1p(
-        x_train_raw[[variable]]
-    )
-
-    x_test_transformed[[variable]] <- log1p(
-        x_test_raw[[variable]]
-    )
-}
-
-
-# compare the skewness before and after transformation for the selected variables, to assess the effectiveness of the log1p transformation (also important for analysis later on)
-if (length(log1p_variables) > 0L) {
-    transformation_comparison <- tibble::tibble(
-        variable = log1p_variables,
-        original_skewness = vapply(
-            x_train_raw[log1p_variables],
-            sample_skewness,
-            numeric(1)
-        ),
-        transformed_skewness = vapply(
-            x_train_transformed[log1p_variables],
-            sample_skewness,
-            numeric(1)
-        )
-    ) |>
-        dplyr::mutate(
-            absolute_reduction =
-                abs(original_skewness) -
-                abs(transformed_skewness)
-        )
-
-    print(
-        knitr::kable(
-            transformation_comparison,
-            digits = 3,
-            caption = paste(
-                "Training-set skewness before",
-                "and after transformation"
-            )
-        )
-    )
-}
-
-
-# calc. the median of each predictor in the training set, to use for imputation of missing values in both training and test sets (just to be extra sure - but I checked the data after and looks like this can be dropped)
-training_medians <- vapply(
-    x_train_transformed,
-    function(x) {
-        stats::median(
-            x,
-            na.rm = TRUE
-        )
-    },
-    numeric(1)
-)
-
-invalid_medians <- !is.finite(training_medians)
-
-if (any(invalid_medians)) {
-    stop(
-        "No usable training values for predictors: ",
-        paste(
-            names(training_medians)[invalid_medians],
-            collapse = ", "
-        )
-    )
-}
-
-impute_with_medians <- function(data, medians) {
-    result <- data
-
-    for (variable in names(medians)) {
-        missing_positions <- is.na(
-            result[[variable]]
-        )
-
-        result[[variable]][missing_positions] <-
-            medians[[variable]]
-    }
-
-    result
-}
-
-x_train_imputed <- impute_with_medians(
-    x_train_transformed,
-    training_medians
-)
-
-x_test_imputed <- impute_with_medians(
-    x_test_transformed,
-    training_medians
-)
-
-stopifnot(
-    !anyNA(x_train_imputed),
-    !anyNA(x_test_imputed)
-)
-
-
-# fit the scaler on the training set and apply it to both training and test sets
-
-x_prep <- fit_scaler(
-    x_train_imputed
-)
-
-x_train <- apply_scaler(
-    x_train_imputed,
-    x_prep
-)
-
-x_test <- apply_scaler(
-    x_test_imputed,
-    x_prep
-)
-
-
-# create foldid for cross-validation, using the group-specific seed (same as original code, but now we are using the transformed and scaled x_train from the previous steps)
-foldid <- make_foldid(
-    n = nrow(x_train),
-    k = 5L,
-    seed = seeds$cv
-)
-
-cat("\nFold sizes:\n")
-print(table(foldid))
-
-
-# summarize the final transformation rules for each predictor, indicating whether log1p was applied or not
-
-transformation_record <- tibble::tibble(
-    variable = predictors,
-    transformation = dplyr::if_else(
-        predictors %in% log1p_variables,
-        "log1p(x)",
-        "none"
-    )
-)
-
-knitr::kable(
-    transformation_record,
-    caption = "Final training-derived transformation rules"
-)
-
-# export the tibble frames to a csv file
-readr::write_csv(
-  skewness_table,
-  file = "../data/tables/skewness_table.csv"
-)
-readr::write_csv(
-    transformation_record,
-    file = "../data/tables/transformation_record.csv"
-)
-```
-
-*Report seeds, dimensions, scaling, folds, and leakage safeguards.*
-
-## 1C. Training-data exploration
-
-```{r training-eda, fig.width=7, fig.height=5}
-# Use analysis_data[train_id, ] only. Add focused plots and summaries.
-
-# add skewness plots from 1B for the selected log1p variables, showing the distribution before and after transformation
-
-# 1. training response distribution
-response_plot_data <- tibble::tibble(
-    response = y_train
-)
-
-ggplot2::ggplot(
-    response_plot_data,
-    ggplot2::aes(x = response)
-) +
-    ggplot2::geom_histogram(
-        bins = 20,
-        fill = "steelblue",
-        color = "white"
-    ) +
-    ggplot2::labs(
-        title = paste(
-            "Training distribution of",
-            config$response
-        ),
-        x = config$response,
-        y = "Count"
-    ) +
-    ggplot2::theme_minimal()
-
-  ggplot2::ggsave(
-    filename = paste0(
-        "../data/training_distribution_",
-        config$response,
-        ".png"
-    ),
-    width = 7,
-    height = 5,
-    units = "in",
-    dpi = 300
-  )
-
-# 2. plot discrete predictors as bar plots, showing the count of each category in the training set
 discrete_predictors <- intersect(
     c(
         "svi",
@@ -693,6 +449,110 @@ discrete_predictors <- intersect(
     ),
     predictors
 )
+
+transformed_predictors <- intersect(
+    c(
+        "age",
+        "lbph",
+        "lcp",
+        "pgg45"
+    ),
+    predictors
+)
+
+
+# ---------------------------------------------------------
+# 1. Response distributions
+#
+# y_train_raw: supplied lpsa
+# y_train: transformed sqrt(PSA)
+# ---------------------------------------------------------
+
+response_plot_data <- dplyr::bind_rows(
+    tibble::tibble(
+        scale = "Supplied response: lpsa",
+        value = y_train_raw
+    ),
+    tibble::tibble(
+        scale = "Model response: sqrt(PSA)",
+        value = y_train
+    )
+)
+
+response_distribution_plot <- ggplot2::ggplot(
+    response_plot_data,
+    ggplot2::aes(x = value)
+) +
+    ggplot2::geom_histogram(
+        bins = 20,
+        fill = "steelblue",
+        color = "white"
+    ) +
+    ggplot2::facet_wrap(
+        ~ scale,
+        scales = "free"
+    ) +
+    ggplot2::labs(
+        title = "Training response distribution",
+        subtitle = paste(
+            "Supplied lpsa and transformed",
+            "sqrt(PSA) = exp(lpsa / 2)"
+        ),
+        x = NULL,
+        y = "Count"
+    ) +
+    ggplot2::theme_minimal()
+
+print(response_distribution_plot)
+
+ggplot2::ggsave(
+    filename = file.path(
+        plot_directory,
+        "training_response_distributions.png"
+    ),
+    plot = response_distribution_plot,
+    width = 9,
+    height = 5,
+    units = "in",
+    dpi = 300,
+    bg = "white"
+)
+
+
+# Response skewness on both scales.
+
+response_skewness_table <- tibble::tibble(
+    scale = c(
+        "Supplied lpsa",
+        "Transformed sqrt(PSA)"
+    ),
+    skewness = c(
+        sample_skewness(y_train_raw),
+        sample_skewness(y_train)
+    )
+) |>
+    dplyr::mutate(
+        absolute_skewness = abs(skewness)
+    )
+
+knitr::kable(
+    response_skewness_table,
+    digits = 3,
+    caption = "Training-response skewness"
+)
+
+readr::write_csv(
+    response_skewness_table,
+    file = file.path(
+        table_directory,
+        "response_skewness.csv"
+    )
+)
+
+
+# ---------------------------------------------------------
+# 2. Discrete predictor distributions
+# ---------------------------------------------------------
 
 discrete_plot_data <- x_train_raw |>
     dplyr::select(
@@ -727,24 +587,32 @@ discrete_predictor_plot <- ggplot2::ggplot(
     ggplot2::labs(
         title = "Discrete predictor distributions",
         subtitle = "Training observations only",
-        x = "Value",
+        x = "Predictor value",
         y = "Count"
     ) +
     ggplot2::theme_minimal()
 
-discrete_predictor_plot
+print(discrete_predictor_plot)
 
-  ggplot2::ggsave(
-    filename = "../data/original_discrete_predictor_distributions.png",
+ggplot2::ggsave(
+    filename = file.path(
+        plot_directory,
+        "original_discrete_predictor_distributions.png"
+    ),
+    plot = discrete_predictor_plot,
     width = 7,
     height = 5,
     units = "in",
-    dpi = 300
-  )
+    dpi = 300,
+    bg = "white"
+)
 
-# 3. original predictor distributions for continuous predictors, before any transformation
 
-original_plot_data <- x_train_raw |>
+# ---------------------------------------------------------
+# 3. Original continuous predictor distributions
+# ---------------------------------------------------------
+
+original_continuous_plot_data <- x_train_raw |>
     dplyr::select(
         dplyr::all_of(continuous_predictors)
     ) |>
@@ -754,8 +622,8 @@ original_plot_data <- x_train_raw |>
         values_to = "value"
     )
 
-ggplot2::ggplot(
-    original_plot_data,
+original_continuous_plot <- ggplot2::ggplot(
+    original_continuous_plot_data,
     ggplot2::aes(x = value)
 ) +
     ggplot2::geom_histogram(
@@ -769,88 +637,445 @@ ggplot2::ggplot(
         ncol = 3
     ) +
     ggplot2::labs(
-        title = "Original predictor distributions",
+        title = "Original continuous predictor distributions",
         subtitle = "Training observations only",
         x = NULL,
         y = "Count"
     ) +
     ggplot2::theme_minimal()
 
-    ggplot2::ggsave(
-    filename = "../data/original_continuous_predictor_distributions.png",
-    width = 7,
-    height = 5,
+print(original_continuous_plot)
+
+ggplot2::ggsave(
+    filename = file.path(
+        plot_directory,
+        "original_continuous_predictor_distributions.png"
+    ),
+    plot = original_continuous_plot,
+    width = 9,
+    height = 6,
     units = "in",
-    dpi = 300
+    dpi = 300,
+    bg = "white"
 )
-# 4. comparison of distributions before and after log1p transformation for the selected variables
 
-if (length(log1p_variables) > 0L) {
-    before_plot_data <- x_train_raw |>
-        dplyr::select(
-            dplyr::all_of(log1p_variables)
-        ) |>
-        tidyr::pivot_longer(
-            cols = dplyr::everything(),
-            names_to = "variable",
-            values_to = "value"
-        ) |>
-        dplyr::mutate(
-            version = "Original"
-        )
 
-    after_plot_data <- x_train_transformed |>
-        dplyr::select(
-            dplyr::all_of(log1p_variables)
-        ) |>
-        tidyr::pivot_longer(
-            cols = dplyr::everything(),
-            names_to = "variable",
-            values_to = "value"
-        ) |>
-        dplyr::mutate(
-            version = "log1p transformed"
-        )
+# ---------------------------------------------------------
+# 4. Compare distributions before and after transformation
+# ---------------------------------------------------------
 
-    comparison_plot_data <- dplyr::bind_rows(
-        before_plot_data,
-        after_plot_data
+before_transformation_data <- x_train_raw |>
+    dplyr::select(
+        dplyr::all_of(transformed_predictors)
+    ) |>
+    tidyr::pivot_longer(
+        cols = dplyr::everything(),
+        names_to = "variable",
+        values_to = "value"
+    ) |>
+    dplyr::mutate(
+        version = "Before transformation"
     )
 
-    print(
-        ggplot2::ggplot(
-            comparison_plot_data,
-            ggplot2::aes(x = value)
-        ) +
-            ggplot2::geom_histogram(
-                bins = 20,
-                fill = "steelblue",
-                color = "white"
-            ) +
-            ggplot2::facet_grid(
-                variable ~ version,
-                scales = "free"
-            ) +
-            ggplot2::labs(
-                title = paste(
-                    "Predictor distributions before",
-                    "and after transformation"
-                ),
-                subtitle = "Training observations only",
-                x = NULL,
-                y = "Count"
-            ) +
-            ggplot2::theme_minimal()
+after_transformation_data <- x_train_transformed |>
+    dplyr::select(
+        dplyr::all_of(transformed_predictors)
+    ) |>
+    tidyr::pivot_longer(
+        cols = dplyr::everything(),
+        names_to = "variable",
+        values_to = "value"
+    ) |>
+    dplyr::mutate(
+        version = "After transformation"
     )
-}
 
-  ggplot2::ggsave(
-    filename = "../data/after_transformation_comparison.png",
+transformation_plot_data <- dplyr::bind_rows(
+    before_transformation_data,
+    after_transformation_data
+)
+
+transformation_comparison_plot <- ggplot2::ggplot(
+    transformation_plot_data,
+    ggplot2::aes(x = value)
+) +
+    ggplot2::geom_histogram(
+        bins = 20,
+        fill = "steelblue",
+        color = "white"
+    ) +
+    ggplot2::facet_grid(
+        variable ~ version,
+        scales = "free"
+    ) +
+    ggplot2::labs(
+        title = "Predictor distributions before and after transformation",
+        subtitle = "Training observations only",
+        x = NULL,
+        y = "Count"
+    ) +
+    ggplot2::theme_minimal()
+
+print(transformation_comparison_plot)
+
+ggplot2::ggsave(
+    filename = file.path(
+        plot_directory,
+        "after_transformation_comparison.png"
+    ),
+    plot = transformation_comparison_plot,
+    width = 10,
+    height = 8,
+    units = "in",
+    dpi = 300,
+    bg = "white"
+)
+
+
+# ---------------------------------------------------------
+# 5. Compare skewness before and after transformation
+# ---------------------------------------------------------
+
+transformation_skewness_table <- tibble::tibble(
+    variable = transformed_predictors,
+    transformation = dplyr::case_when(
+        variable == "age" ~ "x^2",
+        variable == "lbph" ~ "exp(x) - 1",
+        variable == "lcp" ~ "exp(x) - 1",
+        variable == "pgg45" ~ "log1p(x)",
+        TRUE ~ "none"
+    ),
+    original_skewness = vapply(
+        x_train_raw[transformed_predictors],
+        sample_skewness,
+        numeric(1)
+    ),
+    transformed_skewness = vapply(
+        x_train_transformed[transformed_predictors],
+        sample_skewness,
+        numeric(1)
+    )
+) |>
+    dplyr::mutate(
+        original_absolute_skewness =
+            abs(original_skewness),
+        transformed_absolute_skewness =
+            abs(transformed_skewness),
+        absolute_skewness_reduction =
+            original_absolute_skewness -
+            transformed_absolute_skewness,
+        result = dplyr::if_else(
+            absolute_skewness_reduction > 0,
+            "Reduced absolute skewness",
+            "Did not reduce absolute skewness"
+        )
+    )
+
+knitr::kable(
+    transformation_skewness_table,
+    digits = 3,
+    caption = "Training skewness before and after transformation"
+)
+
+readr::write_csv(
+    transformation_skewness_table,
+    file = file.path(
+        table_directory,
+        "transformation_skewness_comparison.csv"
+    )
+)
+
+
+# ---------------------------------------------------------
+# 6. Training correlation table
+#
+# Correlations use transformed, unscaled predictors and the
+# transformed training response. Scaling would not change
+# Pearson correlations.
+# ---------------------------------------------------------
+
+correlation_data <- x_train_transformed |>
+    dplyr::mutate(
+        response = y_train,
+        .before = 1
+    )
+
+correlation_matrix <- stats::cor(
+    correlation_data,
+    use = "complete.obs"
+)
+
+knitr::kable(
+    round(correlation_matrix, 3),
+    caption = paste(
+        "Training correlations after transformation",
+        "and before scaling"
+    )
+)
+
+readr::write_csv(
+    tibble::as_tibble(
+        correlation_matrix,
+        rownames = "variable"
+    ),
+    file = file.path(
+        table_directory,
+        "training_correlation_matrix.csv"
+    )
+)
+
+
+# ---------------------------------------------------------
+# 7. Focused predictor-response relationship
+#
+# Select the predictor with the largest absolute training
+# correlation with the transformed response.
+# ---------------------------------------------------------
+
+response_correlations <- correlation_matrix[
+    "response",
+    setdiff(
+        colnames(correlation_matrix),
+        "response"
+    )
+]
+
+focused_predictor <- names(
+    which.max(
+        abs(response_correlations)
+    )
+)
+
+focused_relationship_data <- tibble::tibble(
+    predictor_value =
+        x_train_transformed[[focused_predictor]],
+    response = y_train
+)
+
+focused_relationship_plot <- ggplot2::ggplot(
+    focused_relationship_data,
+    ggplot2::aes(
+        x = predictor_value,
+        y = response
+    )
+) +
+    ggplot2::geom_point(
+        color = "steelblue",
+        alpha = 0.75
+    ) +
+    ggplot2::geom_smooth(
+        method = "lm",
+        formula = y ~ x,
+        se = TRUE,
+        color = "darkred"
+    ) +
+    ggplot2::labs(
+        title = paste(
+            "Focused training relationship:",
+            focused_predictor,
+            "and sqrt(PSA)"
+        ),
+        subtitle = paste(
+            "Selected by largest absolute",
+            "training correlation"
+        ),
+        x = focused_predictor,
+        y = "sqrt(PSA)"
+    ) +
+    ggplot2::theme_minimal()
+
+print(focused_relationship_plot)
+
+ggplot2::ggsave(
+    filename = file.path(
+        plot_directory,
+        "predictors_vs_lpsa.png"
+    ),
+    plot = focused_relationship_plot,
     width = 7,
     height = 5,
     units = "in",
-    dpi = 300
-  )
+    dpi = 300,
+    bg = "white"
+)
+
+
+# ---------------------------------------------------------
+# 8. Possible anomaly
+#
+# x_train is already centered and scaled using training-only
+# constants. Flag observations with the largest absolute
+# standardized predictor value.
+# ---------------------------------------------------------
+
+maximum_absolute_z <- apply(
+    abs(x_train),
+    MARGIN = 1,
+    FUN = max
+)
+
+possible_anomalies <- tibble::tibble(
+    training_position = seq_len(
+        nrow(x_train)
+    ),
+    original_row = train_id,
+    maximum_absolute_z =
+        maximum_absolute_z
+) |>
+    dplyr::arrange(
+        dplyr::desc(maximum_absolute_z)
+    ) |>
+    dplyr::slice_head(
+        n = 5
+    )
+
+knitr::kable(
+    possible_anomalies,
+    digits = 3,
+    caption = paste(
+        "Training observations with the largest",
+        "absolute standardized predictor values"
+    )
+)
+
+readr::write_csv(
+    possible_anomalies,
+    file = file.path(
+        table_directory,
+        "possible_anomalies.csv"
+    )
+)
+
+
+# Identify the variable responsible for the most extreme value.
+
+most_extreme_training_position <-
+    possible_anomalies$training_position[1]
+
+most_extreme_predictor <- colnames(x_train)[
+    which.max(
+        abs(
+            x_train[
+                most_extreme_training_position,
+                ,
+                drop = TRUE
+            ]
+        )
+    )
+]
+
+most_extreme_value <- x_train[
+    most_extreme_training_position,
+    most_extreme_predictor
+]
+
+possible_anomaly_detail <- tibble::tibble(
+    original_row =
+        possible_anomalies$original_row[1],
+    predictor = most_extreme_predictor,
+    standardized_value = most_extreme_value
+)
+
+knitr::kable(
+    possible_anomaly_detail,
+    digits = 3,
+    caption = "Most extreme training predictor value"
+)
+
+
+# ---------------------------------------------------------
+# 9. Potential multicollinearity
+#
+# Find the strongest absolute predictor-predictor correlations.
+# ---------------------------------------------------------
+
+predictor_correlation_matrix <- stats::cor(
+    x_train_transformed,
+    use = "complete.obs"
+)
+
+upper_triangle_indices <- which(
+    upper.tri(
+        predictor_correlation_matrix
+    ),
+    arr.ind = TRUE
+)
+
+correlation_pairs <- tibble::tibble(
+    predictor_1 = rownames(
+        predictor_correlation_matrix
+    )[
+        upper_triangle_indices[, 1]
+    ],
+    predictor_2 = colnames(
+        predictor_correlation_matrix
+    )[
+        upper_triangle_indices[, 2]
+    ],
+    correlation = predictor_correlation_matrix[
+        upper_triangle_indices
+    ]
+) |>
+    dplyr::mutate(
+        absolute_correlation = abs(correlation)
+    ) |>
+    dplyr::arrange(
+        dplyr::desc(absolute_correlation)
+    )
+
+strongest_correlation_pairs <- correlation_pairs |>
+    dplyr::slice_head(
+        n = 5
+    )
+
+knitr::kable(
+    strongest_correlation_pairs,
+    digits = 3,
+    caption = "Strongest training predictor correlations"
+)
+
+readr::write_csv(
+    strongest_correlation_pairs,
+    file = file.path(
+        table_directory,
+        "strongest_predictor_correlations.csv"
+    )
+)
+
+
+# Values used in the written interpretation.
+
+cat(
+    "\nFocused predictor:",
+    focused_predictor,
+    "\n"
+)
+
+cat(
+    "Possible anomaly: original row",
+    possible_anomaly_detail$original_row,
+    "with standardized",
+    possible_anomaly_detail$predictor,
+    "=",
+    round(
+        possible_anomaly_detail$standardized_value,
+        3
+    ),
+    "\n"
+)
+
+cat(
+    "Strongest correlated predictor pair:",
+    strongest_correlation_pairs$predictor_1[1],
+    "and",
+    strongest_correlation_pairs$predictor_2[1],
+    "with correlation",
+    round(
+        strongest_correlation_pairs$correlation[1],
+        3
+    ),
+    "\n"
+)
 ```
 
 *Interpret multicollinearity, one anomaly, and the question regularization will address.*
@@ -950,10 +1175,12 @@ M <- 200L
 
 ## 4D. Locked declaration and final holdout evaluation
 
-> **Locked before viewing `y_test`:** [preprocessing, candidate specifications, selected tuning values, feature seed, nominated deployment model, metrics]
+> **Locked before viewing `y_test_locked`:** [preprocessing, candidate specifications, selected tuning values, feature seed, nominated deployment model, metrics]
 
 ```{r final-holdout-evaluation, eval=FALSE}
-# This must be the first analysis chunk that uses y_test for evaluation.
+# This must be the first analysis chunk that transforms and uses y_test_locked.
+# Use y_test <- transform_response(y_test_locked) here, then evaluate every
+# already-fixed candidate on the sqrt(PSA) response scale.
 # Generate all fixed candidate predictions and one RMSE/MAE table here.
 ```
 
@@ -988,7 +1215,8 @@ M <- 200L
 ```{r preflight, eval=FALSE}
 # Add every object required to reproduce the final table and figures.
 required_objects <- c(
-  "train_id", "test_id", "x_train", "x_test", "y_train", "y_test", "foldid"
+  "train_id", "test_id", "x_train", "x_test", "y_train",
+  "y_test_locked", "transform_response", "foldid"
 )
 missing_objects <- setdiff(required_objects, ls())
 if (length(missing_objects)) {
