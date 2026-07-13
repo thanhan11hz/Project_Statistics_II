@@ -282,16 +282,15 @@ y_test_locked <- analysis_data[
     drop = TRUE
 ]
 
-# Apply the fixed transformation map to predictors. pgg45 contains zeros,
-# so log1p(x) is used instead of undefined log(0).
+# Apply the fixed transformation map to predictors. (only change age as per newest decision)
 transform_predictors <- function(x) {
     transformed <- x
     transformed$age <- x$age^2
-    transformed$lbph <- expm1(x$lbph)
+    transformed$lbph <- transformed$lpbh
     transformed$lcavol <- x$lcavol
-    transformed$lcp <- expm1(x$lcp)
+    transformed$lcp <- transformed$lcp
     transformed$lweight <- x$lweight
-    transformed$pgg45 <- log1p(x$pgg45)
+    transformed$pgg45 <- transformed$pgg45
     transformed$gleason <- x$gleason
     transformed$svi <- x$svi
     transformed
@@ -341,11 +340,11 @@ transformation_record <- tibble::tibble(
     dplyr::mutate(
         transformation = dplyr::case_when(
             variable == "age" ~ "x^2",
-            variable == "lbph" ~ "exp(x) - 1",
+            variable == "lbph" ~ "none",
             variable == "lcavol" ~ "none",
-            variable == "lcp" ~ "exp(x) - 1",
+            variable == "lcp" ~ "none",
             variable == "lweight" ~ "none",
-            variable == "pgg45" ~ "log1p(x)",
+            variable == "pgg45" ~ "none",
             variable == "gleason" ~ "none",
             variable == "svi" ~ "none",
             variable == "lpsa" ~ "exp(x / 2) = sqrt(PSA)",
@@ -371,12 +370,12 @@ All exploratory calculations in this section use training observations only. The
 # ---------------------------------------------------------
 
 plot_directory <- file.path(
-    "data",
+    "submission/submission_data",
     "plots"
 )
 
 table_directory <- file.path(
-    "data",
+    "submission/submission_data",
     "tables"
 )
 
@@ -394,7 +393,7 @@ dir.create(
 
 
 # ---------------------------------------------------------
-# Helper function: sample skewness
+# Helper function
 # ---------------------------------------------------------
 
 sample_skewness <- function(x) {
@@ -425,7 +424,7 @@ sample_skewness <- function(x) {
 
 
 # ---------------------------------------------------------
-# Identify continuous and discrete predictors
+# Variable groups
 # ---------------------------------------------------------
 
 continuous_predictors <- predictors[
@@ -450,36 +449,38 @@ discrete_predictors <- intersect(
     predictors
 )
 
-transformed_predictors <- intersect(
-    c(
-        "age",
-        "lbph",
-        "lcp",
-        "pgg45"
-    ),
-    predictors
+# Age is shown separately in the transformation comparison.
+continuous_predictors_as_is <- setdiff(
+    continuous_predictors,
+    "age"
 )
 
 
 # ---------------------------------------------------------
-# 1. Response distributions
-#
-# y_train_raw: supplied lpsa
-# y_train: transformed sqrt(PSA)
+# 1. Response before and after transformation
 # ---------------------------------------------------------
 
 response_plot_data <- dplyr::bind_rows(
     tibble::tibble(
-        scale = "Supplied response: lpsa",
+        version = "Before: lpsa",
         value = y_train_raw
     ),
     tibble::tibble(
-        scale = "Model response: sqrt(PSA)",
+        version = "After: sqrt(PSA)",
         value = y_train
     )
-)
+) |>
+    dplyr::mutate(
+        version = factor(
+            version,
+            levels = c(
+                "Before: lpsa",
+                "After: sqrt(PSA)"
+            )
+        )
+    )
 
-response_distribution_plot <- ggplot2::ggplot(
+response_transformation_plot <- ggplot2::ggplot(
     response_plot_data,
     ggplot2::aes(x = value)
 ) +
@@ -489,13 +490,14 @@ response_distribution_plot <- ggplot2::ggplot(
         color = "white"
     ) +
     ggplot2::facet_wrap(
-        ~ scale,
-        scales = "free"
+        ~ version,
+        scales = "free_x",
+        ncol = 2
     ) +
     ggplot2::labs(
-        title = "Training response distribution",
+        title = "Response before and after transformation",
         subtitle = paste(
-            "Supplied lpsa and transformed",
+            "Training observations only;",
             "sqrt(PSA) = exp(lpsa / 2)"
         ),
         x = NULL,
@@ -503,14 +505,14 @@ response_distribution_plot <- ggplot2::ggplot(
     ) +
     ggplot2::theme_minimal()
 
-print(response_distribution_plot)
+print(response_transformation_plot)
 
 ggplot2::ggsave(
     filename = file.path(
         plot_directory,
-        "training_response_distributions.png"
+        "1. response_transformation_comparison.png"
     ),
-    plot = response_distribution_plot,
+    plot = response_transformation_plot,
     width = 9,
     height = 5,
     units = "in",
@@ -519,88 +521,61 @@ ggplot2::ggsave(
 )
 
 
-# Response skewness on both scales.
+# ---------------------------------------------------------
+# 2. Age before and after transformation
+# ---------------------------------------------------------
 
-response_skewness_table <- tibble::tibble(
-    scale = c(
-        "Supplied lpsa",
-        "Transformed sqrt(PSA)"
+age_plot_data <- dplyr::bind_rows(
+    tibble::tibble(
+        version = "Before: age",
+        value = x_train_raw$age
     ),
-    skewness = c(
-        sample_skewness(y_train_raw),
-        sample_skewness(y_train)
+    tibble::tibble(
+        version = "After: age^2",
+        value = x_train_transformed$age
     )
 ) |>
     dplyr::mutate(
-        absolute_skewness = abs(skewness)
+        version = factor(
+            version,
+            levels = c(
+                "Before: age",
+                "After: age^2"
+            )
+        )
     )
 
-knitr::kable(
-    response_skewness_table,
-    digits = 3,
-    caption = "Training-response skewness"
-)
-
-readr::write_csv(
-    response_skewness_table,
-    file = file.path(
-        table_directory,
-        "response_skewness.csv"
-    )
-)
-
-
-# ---------------------------------------------------------
-# 2. Discrete predictor distributions
-# ---------------------------------------------------------
-
-discrete_plot_data <- x_train_raw |>
-    dplyr::select(
-        dplyr::all_of(discrete_predictors)
-    ) |>
-    tidyr::pivot_longer(
-        cols = dplyr::everything(),
-        names_to = "variable",
-        values_to = "value"
-    ) |>
-    dplyr::count(
-        variable,
-        value,
-        name = "count"
-    )
-
-discrete_predictor_plot <- ggplot2::ggplot(
-    discrete_plot_data,
-    ggplot2::aes(
-        x = factor(value),
-        y = count
-    )
+age_transformation_plot <- ggplot2::ggplot(
+    age_plot_data,
+    ggplot2::aes(x = value)
 ) +
-    ggplot2::geom_col(
+    ggplot2::geom_histogram(
+        bins = 20,
         fill = "steelblue",
         color = "white"
     ) +
     ggplot2::facet_wrap(
-        ~ variable,
-        scales = "free_x"
+        ~ version,
+        scales = "free_x",
+        ncol = 2
     ) +
     ggplot2::labs(
-        title = "Discrete predictor distributions",
+        title = "Age before and after transformation",
         subtitle = "Training observations only",
-        x = "Predictor value",
+        x = NULL,
         y = "Count"
     ) +
     ggplot2::theme_minimal()
 
-print(discrete_predictor_plot)
+print(age_transformation_plot)
 
 ggplot2::ggsave(
     filename = file.path(
         plot_directory,
-        "original_discrete_predictor_distributions.png"
+        "2. age_transformation_comparison.png"
     ),
-    plot = discrete_predictor_plot,
-    width = 7,
+    plot = age_transformation_plot,
+    width = 9,
     height = 5,
     units = "in",
     dpi = 300,
@@ -609,151 +584,33 @@ ggplot2::ggsave(
 
 
 # ---------------------------------------------------------
-# 3. Original continuous predictor distributions
-# ---------------------------------------------------------
-
-original_continuous_plot_data <- x_train_raw |>
-    dplyr::select(
-        dplyr::all_of(continuous_predictors)
-    ) |>
-    tidyr::pivot_longer(
-        cols = dplyr::everything(),
-        names_to = "variable",
-        values_to = "value"
-    )
-
-original_continuous_plot <- ggplot2::ggplot(
-    original_continuous_plot_data,
-    ggplot2::aes(x = value)
-) +
-    ggplot2::geom_histogram(
-        bins = 20,
-        fill = "steelblue",
-        color = "white"
-    ) +
-    ggplot2::facet_wrap(
-        ~ variable,
-        scales = "free",
-        ncol = 3
-    ) +
-    ggplot2::labs(
-        title = "Original continuous predictor distributions",
-        subtitle = "Training observations only",
-        x = NULL,
-        y = "Count"
-    ) +
-    ggplot2::theme_minimal()
-
-print(original_continuous_plot)
-
-ggplot2::ggsave(
-    filename = file.path(
-        plot_directory,
-        "original_continuous_predictor_distributions.png"
-    ),
-    plot = original_continuous_plot,
-    width = 9,
-    height = 6,
-    units = "in",
-    dpi = 300,
-    bg = "white"
-)
-
-
-# ---------------------------------------------------------
-# 4. Compare distributions before and after transformation
-# ---------------------------------------------------------
-
-before_transformation_data <- x_train_raw |>
-    dplyr::select(
-        dplyr::all_of(transformed_predictors)
-    ) |>
-    tidyr::pivot_longer(
-        cols = dplyr::everything(),
-        names_to = "variable",
-        values_to = "value"
-    ) |>
-    dplyr::mutate(
-        version = "Before transformation"
-    )
-
-after_transformation_data <- x_train_transformed |>
-    dplyr::select(
-        dplyr::all_of(transformed_predictors)
-    ) |>
-    tidyr::pivot_longer(
-        cols = dplyr::everything(),
-        names_to = "variable",
-        values_to = "value"
-    ) |>
-    dplyr::mutate(
-        version = "After transformation"
-    )
-
-transformation_plot_data <- dplyr::bind_rows(
-    before_transformation_data,
-    after_transformation_data
-)
-
-transformation_comparison_plot <- ggplot2::ggplot(
-    transformation_plot_data,
-    ggplot2::aes(x = value)
-) +
-    ggplot2::geom_histogram(
-        bins = 20,
-        fill = "steelblue",
-        color = "white"
-    ) +
-    ggplot2::facet_grid(
-        variable ~ version,
-        scales = "free"
-    ) +
-    ggplot2::labs(
-        title = "Predictor distributions before and after transformation",
-        subtitle = "Training observations only",
-        x = NULL,
-        y = "Count"
-    ) +
-    ggplot2::theme_minimal()
-
-print(transformation_comparison_plot)
-
-ggplot2::ggsave(
-    filename = file.path(
-        plot_directory,
-        "after_transformation_comparison.png"
-    ),
-    plot = transformation_comparison_plot,
-    width = 10,
-    height = 8,
-    units = "in",
-    dpi = 300,
-    bg = "white"
-)
-
-
-# ---------------------------------------------------------
-# 5. Compare skewness before and after transformation
+# 3. Skewness comparison for age and response only
 # ---------------------------------------------------------
 
 transformation_skewness_table <- tibble::tibble(
-    variable = transformed_predictors,
-    transformation = dplyr::case_when(
-        variable == "age" ~ "x^2",
-        variable == "lbph" ~ "exp(x) - 1",
-        variable == "lcp" ~ "exp(x) - 1",
-        variable == "pgg45" ~ "log1p(x)",
-        TRUE ~ "none"
+    variable = c(
+        "age",
+        "response"
     ),
-    original_skewness = vapply(
-        x_train_raw[transformed_predictors],
-        sample_skewness,
-        numeric(1)
+    transformation = c(
+        "age^2",
+        "exp(lpsa / 2) = sqrt(PSA)"
     ),
-    transformed_skewness = vapply(
-        x_train_transformed[transformed_predictors],
-        sample_skewness,
-        numeric(1)
+    original_skewness = c(
+        sample_skewness(
+            x_train_raw$age
+        ),
+        sample_skewness(
+            y_train_raw
+        )
+    ),
+    transformed_skewness = c(
+        sample_skewness(
+            x_train_transformed$age
+        ),
+        sample_skewness(
+            y_train
+        )
     )
 ) |>
     dplyr::mutate(
@@ -774,24 +631,137 @@ transformation_skewness_table <- tibble::tibble(
 knitr::kable(
     transformation_skewness_table,
     digits = 3,
-    caption = "Training skewness before and after transformation"
+    caption = "Age and response skewness before and after transformation"
 )
 
 readr::write_csv(
     transformation_skewness_table,
     file = file.path(
         table_directory,
-        "transformation_skewness_comparison.csv"
+        "3. transformation_skewness_comparison.csv"
     )
 )
 
 
 # ---------------------------------------------------------
+# 4. Remaining continuous predictors on supplied scales
+# ---------------------------------------------------------
+
+original_continuous_plot_data <- x_train_raw |>
+    dplyr::select(
+        dplyr::all_of(
+            continuous_predictors_as_is
+        )
+    ) |>
+    tidyr::pivot_longer(
+        cols = dplyr::everything(),
+        names_to = "variable",
+        values_to = "value"
+    )
+
+original_continuous_predictor_plot <- ggplot2::ggplot(
+    original_continuous_plot_data,
+    ggplot2::aes(x = value)
+) +
+    ggplot2::geom_histogram(
+        bins = 20,
+        fill = "steelblue",
+        color = "white"
+    ) +
+    ggplot2::facet_wrap(
+        ~ variable,
+        scales = "free_x",
+        ncol = 3
+    ) +
+    ggplot2::labs(
+        title = "Original continuous predictor distributions",
+        subtitle = paste(
+            "Training observations only;",
+            "age is shown separately"
+        ),
+        x = NULL,
+        y = "Count"
+    ) +
+    ggplot2::theme_minimal()
+
+print(original_continuous_predictor_plot)
+
+ggplot2::ggsave(
+    filename = file.path(
+        plot_directory,
+        "4. original_continuous_predictor_distributions.png"
+    ),
+    plot = original_continuous_predictor_plot,
+    width = 9,
+    height = 6,
+    units = "in",
+    dpi = 300,
+    bg = "white"
+)
+
+
+# ---------------------------------------------------------
+# 5. Discrete predictors on supplied scales
+# ---------------------------------------------------------
+
+discrete_plot_data <- x_train_raw |>
+    dplyr::select(
+        dplyr::all_of(
+            discrete_predictors
+        )
+    ) |>
+    tidyr::pivot_longer(
+        cols = dplyr::everything(),
+        names_to = "variable",
+        values_to = "value"
+    ) |>
+    dplyr::count(
+        variable,
+        value,
+        name = "count"
+    )
+
+original_discrete_predictor_plot <- ggplot2::ggplot(
+    discrete_plot_data,
+    ggplot2::aes(
+        x = factor(value),
+        y = count
+    )
+) +
+    ggplot2::geom_col(
+        fill = "steelblue",
+        color = "white"
+    ) +
+    ggplot2::facet_wrap(
+        ~ variable,
+        scales = "free_x"
+    ) +
+    ggplot2::labs(
+        title = "Original discrete predictor distributions",
+        subtitle = "Training observations only",
+        x = "Predictor value",
+        y = "Count"
+    ) +
+    ggplot2::theme_minimal()
+
+print(original_discrete_predictor_plot)
+
+ggplot2::ggsave(
+    filename = file.path(
+        plot_directory,
+        "5. original_discrete_predictor_distributions.png"
+    ),
+    plot = original_discrete_predictor_plot,
+    width = 7,
+    height = 5,
+    units = "in",
+    dpi = 300,
+    bg = "white"
+)
+
+
+# ---------------------------------------------------------
 # 6. Training correlation table
-#
-# Correlations use transformed, unscaled predictors and the
-# transformed training response. Scaling would not change
-# Pearson correlations.
 # ---------------------------------------------------------
 
 correlation_data <- x_train_transformed |>
@@ -820,16 +790,13 @@ readr::write_csv(
     ),
     file = file.path(
         table_directory,
-        "training_correlation_matrix.csv"
+        "6. training_correlation_matrix.csv"
     )
 )
 
 
 # ---------------------------------------------------------
 # 7. Focused predictor-response relationship
-#
-# Select the predictor with the largest absolute training
-# correlation with the transformed response.
 # ---------------------------------------------------------
 
 response_correlations <- correlation_matrix[
@@ -871,12 +838,11 @@ focused_relationship_plot <- ggplot2::ggplot(
     ) +
     ggplot2::labs(
         title = paste(
-            "Focused training relationship:",
             focused_predictor,
-            "and sqrt(PSA)"
+            "and transformed response"
         ),
         subtitle = paste(
-            "Selected by largest absolute",
+            "Predictor selected by largest absolute",
             "training correlation"
         ),
         x = focused_predictor,
@@ -889,7 +855,7 @@ print(focused_relationship_plot)
 ggplot2::ggsave(
     filename = file.path(
         plot_directory,
-        "predictors_vs_lpsa.png"
+        "7. predictor_vs_sqrt_psa.png"
     ),
     plot = focused_relationship_plot,
     width = 7,
@@ -902,10 +868,6 @@ ggplot2::ggsave(
 
 # ---------------------------------------------------------
 # 8. Possible anomaly
-#
-# x_train is already centered and scaled using training-only
-# constants. Flag observations with the largest absolute
-# standardized predictor value.
 # ---------------------------------------------------------
 
 maximum_absolute_z <- apply(
@@ -942,12 +904,9 @@ readr::write_csv(
     possible_anomalies,
     file = file.path(
         table_directory,
-        "possible_anomalies.csv"
+        "8. possible_anomalies.csv"
     )
 )
-
-
-# Identify the variable responsible for the most extreme value.
 
 most_extreme_training_position <-
     possible_anomalies$training_position[1]
@@ -964,16 +923,14 @@ most_extreme_predictor <- colnames(x_train)[
     )
 ]
 
-most_extreme_value <- x_train[
-    most_extreme_training_position,
-    most_extreme_predictor
-]
-
 possible_anomaly_detail <- tibble::tibble(
     original_row =
         possible_anomalies$original_row[1],
     predictor = most_extreme_predictor,
-    standardized_value = most_extreme_value
+    standardized_value = x_train[
+        most_extreme_training_position,
+        most_extreme_predictor
+    ]
 )
 
 knitr::kable(
@@ -985,8 +942,6 @@ knitr::kable(
 
 # ---------------------------------------------------------
 # 9. Potential multicollinearity
-#
-# Find the strongest absolute predictor-predictor correlations.
 # ---------------------------------------------------------
 
 predictor_correlation_matrix <- stats::cor(
@@ -1038,12 +993,14 @@ readr::write_csv(
     strongest_correlation_pairs,
     file = file.path(
         table_directory,
-        "strongest_predictor_correlations.csv"
+        "9. strongest_predictor_correlations.csv"
     )
 )
 
 
-# Values used in the written interpretation.
+# ---------------------------------------------------------
+# Values for the written interpretation
+# ---------------------------------------------------------
 
 cat(
     "\nFocused predictor:",
