@@ -491,7 +491,7 @@ response_transformation_plot <- ggplot2::ggplot(
     ) +
     ggplot2::facet_wrap(
         ~ version,
-        scales = "free_x",
+        scales = "free",
         ncol = 2
     ) +
     ggplot2::labs(
