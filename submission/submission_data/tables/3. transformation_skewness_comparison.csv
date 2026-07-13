@@ -1,0 +1,3 @@
+variable,transformation,original_skewness,transformed_skewness,original_absolute_skewness,transformed_absolute_skewness,absolute_skewness_reduction,result
+age,age^2,-0.7473639601907085,-0.30391786926325676,0.7473639601907085,0.30391786926325676,0.44344609092745174,Reduced absolute skewness
+response,exp(lpsa / 2) = sqrt(PSA),-0.1251268577332118,2.724611887007195,0.1251268577332118,2.724611887007195,-2.5994850292739833,Did not reduce absolute skewness
