@@ -15,7 +15,7 @@ output:
 bibliography: references.bib
 link-citations: true
 params:
-  group_number: 0
+  group_number: 2
 fontsize: 11pt
 geometry: margin=1in
 ---
@@ -200,21 +200,99 @@ if (!all(vapply(analysis_data, is.numeric, logical(1)))) {
 
 ## 1B. Split and train-only preprocessing
 
-```{r split-and-scale, eval=FALSE}
-split <- split_rows(nrow(analysis_data), seed = seeds$split)
+```{r split-and-scale}
+
+add_nonlinear_features <- function(x) {
+  x <- as.matrix(x)
+  p <- ncol(x)
+  n_rows <- nrow(x)
+  col_names <- colnames(x)
+  if (is.null(col_names)) {
+    col_names <- paste0("V", seq_len(p))
+  }
+  
+  # 1. Calculate the number of non-linear terms
+  # p squared terms + p*(p-1)/2 interaction terms
+  num_nonlinear <- p + (p * (p - 1)) / 2
+  
+  # 2. Pre-allocate the non-linear matrix for performance
+  non_linear_mat <- matrix(NA, nrow = n_rows, ncol = num_nonlinear)
+  non_linear_names <- character(num_nonlinear)
+  
+  col_idx <- 1
+  
+  # 3. Generate squared terms (x_i ^ 2)
+  for (i in seq_len(p)) {
+    non_linear_mat[, col_idx] <- x[, i]^2
+    non_linear_names[col_idx] <- paste0(col_names[i], "_sq")
+    col_idx <- col_idx + 1
+  }
+  
+  # 4. Generate cross-interaction terms (x_i * x_j)
+  if (p > 1) {
+    for (i in seq_len(p - 1)) {
+      for (j in (i + 1):p) {
+        non_linear_mat[, col_idx] <- x[, i] * x[, j]
+        non_linear_names[col_idx] <- paste0(col_names[i], "_x_", col_names[j])
+        col_idx <- col_idx + 1
+      }
+    }
+  }
+  
+  # Assign column names to the non-linear matrix
+  colnames(non_linear_mat) <- non_linear_names
+  
+  # 5. Combine the original linear matrix and the new non-linear matrix
+  cbind(x, non_linear_mat)
+}
+
+# Split once using the declared group-specific seed.
+split <- split_rows(
+    n = nrow(analysis_data),
+    train_prop = 0.80,
+    seed = seeds$split
+)
+
 train_id <- split$train
 test_id <- split$test
+
+stopifnot(
+    length(intersect(train_id, test_id)) == 0L
+)
 
 x_raw <- as.matrix(analysis_data[, predictors, drop = FALSE])
 y_raw <- analysis_data[[config$response]]
 
+x_raw_nonlinear <- add_nonlinear_features(x_raw)
+
+x_prep <- fit_scaler(x_raw_nonlinear[train_id, , drop = FALSE])
+x_raw_nonlinear_scaled <- apply_scaler(x_raw_nonlinear, x_prep)
+
 x_prep <- fit_scaler(x_raw[train_id, , drop = FALSE])
-x_train <- apply_scaler(x_raw[train_id, , drop = FALSE], x_prep)
-x_test <- apply_scaler(x_raw[test_id, , drop = FALSE], x_prep)
+x_raw_scaled <- apply_scaler(x_raw, x_prep)
+
+#official data
+
+#non linear data
+x_train_nonlinear <- x_raw_nonlinear_scaled[train_id, , drop = FALSE]
+x_test_nonlinear <- x_raw_nonlinear_scaled[test_id, , drop = FALSE]
+y_train_nonlinear <- y_raw[train_id]
+y_test_nonlinear <- y_raw[test_id]
+
+#linear data
+x_train <- x_raw_scaled[train_id, , drop = FALSE]
+x_test <- x_raw_scaled[test_id, , drop = FALSE]
 y_train <- y_raw[train_id]
 y_test <- y_raw[test_id]
 
-foldid <- make_foldid(nrow(x_train), k = 5L, seed = seeds$cv)
+# Create one shared five-fold assignment for all training comparisons.
+foldid <- make_foldid(
+    n = nrow(x_train),
+    k = 5L,
+    seed = seeds$cv
+)
+
+
 ```
 
 *Report seeds, dimensions, scaling, folds, and leakage safeguards.*
@@ -233,6 +311,26 @@ foldid <- make_foldid(nrow(x_train), k = 5L, seed = seeds$cv)
 
 ```{r ols, eval=FALSE}
 # Fit OLS on x_train and y_train. Do not access y_test here.
+
+ols_stepwise_regression <- function(x_train,
+                        y_train,
+                        direction = "both") {
+  df = as.data.frame(x_train)
+  df$y = y_train
+  full_model <- lm(y ~ ., data = df)
+
+  best_model <- step(
+    full_model,
+    direction = direction,
+    trace = 1
+  )
+
+  return(best_model)
+}
+
+ols_stepwise_regression(x_train_nonlinear, y_train_nonlinear)
+
+
 ```
 
 ## 2B. Ridge
@@ -303,19 +401,244 @@ alpha_grid <- c(0.10, 0.25, 0.50, 0.75, 0.90)
 
 # Fit one cv.glmnet object per alpha with the same foldid.
 # Select alpha and lambda using training CV only.
+
+fit_elastic_net_4B <- function(x, y, foldid, alpha_list){
+  fits <- list()
+  for (alpha in alpha_list){
+        fits[[as.character((alpha))]] <- cv.glmnet(
+        x = x,
+        y = y,
+        alpha = alpha,
+        foldid = foldid
+    )
+  }
+  return(fits)
+}
+
+plot_coef_path_4B <- function(glmnet_fit, alpha, title) {
+
+  if (!is.null(alpha)) {
+    title <- paste0(title, " (alpha = ", alpha, ")")
+  } 
+  
+  coef_mat <- as.matrix(glmnet_fit$beta)
+  colnames(coef_mat) <- glmnet_fit$lambda
+
+  coef_df <- as.data.frame(coef_mat) |>
+    tibble::rownames_to_column("variable") |>
+    tidyr::pivot_longer(
+      -variable,
+      names_to = "lambda",
+      values_to = "coefficient"
+    ) |>
+    dplyr::mutate(
+      lambda = as.numeric(lambda)
+    )
+
+  ggplot2::ggplot(
+    coef_df,
+    ggplot2::aes(
+      x = lambda,
+      y = coefficient,
+      colour = variable
+    )
+  ) +
+    ggplot2::geom_line() +
+    ggplot2::labs(
+      title = title,
+      x = expression(lambda),
+      y = "Coefficient"
+    ) +
+    ggplot2::theme_minimal()
+}
+
+plot_nonzero_slopes_4B <- function(glmnet_fit, alpha, title) {
+  
+  if (!is.null(alpha)) {
+    title <- paste0(title, " (alpha = ", alpha, ")")
+  } 
+
+  df_data <- tibble::tibble(
+    lambda = glmnet_fit$lambda,
+    df = glmnet_fit$df
+  )
+
+  ggplot2::ggplot(
+    df_data,
+    ggplot2::aes(
+      x = lambda,
+      y = df,
+    )
+  ) +
+    ggplot2::geom_line() +
+    ggplot2::labs(
+      title = title,
+      x = expression(lambda),
+      y = "number of none-zero slopes"
+    ) +
+    ggplot2::theme_minimal()
+}
+
+plot_cross_validation_error <- function(cv_glmnet_fit, alpha, title) {
+  
+  if (!is.null(alpha)) {
+    title <- paste0(title, " (alpha = ", alpha, ")")
+  } 
+
+  error_data <- tibble::tibble(
+    lambda = cv_glmnet_fit$lambda,
+    error = cv_glmnet_fit$cvm
+  )
+
+  ggplot2::ggplot(
+    error_data,
+    ggplot2::aes(
+      x = lambda,
+      y = error,
+    )
+  ) +
+    ggplot2::geom_line() +
+    ggplot2::labs(
+      title = title,
+      x = expression(lambda),
+      y = "cross-validation error"
+    ) +
+    ggplot2::theme_minimal()
+}
+
+elastic_net_list <- fit_elastic_net_4B(x_train, y_train, foldid, alpha_grid)
+
+for (alpha in names(elastic_net_list)) {
+  fit <- elastic_net_list[[alpha]]$glmnet.fit
+  print(plot_coef_path_4B(fit, alpha, "Elastic Net Coefficient Paths"))
+}
+
+for (alpha in names(elastic_net_list)) {
+  fit <- elastic_net_list[[alpha]]$glmnet.fit
+  print(plot_nonzero_slopes_4B(fit, alpha, "Number of Non-Zero Slopes"))
+}
+
+for (alpha in names(elastic_net_list)) {
+  fit <- elastic_net_list[[alpha]]
+  print(plot_cross_validation_error(fit, alpha, "Cross-Validation Error"))
+}
+
+cv_results <- tibble::tibble(
+  alpha = numeric(),
+  lambda = numeric(),
+  cv_error = numeric()
+)
+
+for (alpha in names(elastic_net_list)) {
+  fit <- elastic_net_list[[alpha]]
+  idx <- which(fit$lambda == fit$lambda.min)
+  error <- fit$cvm[idx]
+  cv_results <- dplyr::add_row(
+    cv_results,
+    alpha = as.numeric(alpha),
+    lambda = fit$lambda.min,
+    cv_error = error
+  )
+}
+
+best_elastic_net_param <- cv_results |> dplyr::slice_min(cv_error, n=1)
+best_elastic_net_param <- best_elastic_net_param[1, ]
+best_elastic_net_model <- elastic_net_list[[as.character(
+  best_elastic_net_param$alpha
+)]]
 ```
+
+
 
 ## 4C. Fixed ReLU features
 
 ```{r random-relu-features, eval=FALSE}
-relu <- function(z) pmax(z, 0)
+relu <- function(z, A, C){
+  z <- z %*% t(A)
+  C <- matrix(C, nrow = nrow(z), ncol = length(C), byrow = TRUE)
+  z <- z + C
+  return (pmax(z, 0))
+} 
 M <- 200L
+p <- ncol(x_train)
 
 # TODO:
 # 1. Generate A and bias once from seeds$features using the stated distributions.
 # 2. Apply the same A and bias to x_train and x_test.
 # 3. Fit a scaler to H_train only and apply it to H_test.
 # 4. Fit ridge, lasso, and elastic net on H_train with the shared foldid.
+
+set.seed(22)
+
+A <- matrix(rnorm(M * p, mean = 0, sd = sqrt(1/p)),
+            nrow = M, ncol = p)
+
+C <- matrix(rnorm(M * 1, mean = 0, sd = 0.5 ),
+            nrow = M, ncol = 1)
+
+x_hidden <- relu(x_train, A, C)
+same_col <- apply(x_hidden, 2, function(col) all(col == col[1]))
+print(same_col)
+
+cv_ridge <- cv.glmnet(
+  x = x_hidden,
+  y = y_train,
+  alpha = 0,     
+  foldid = foldid 
+)
+
+cv_lasso <- cv.glmnet(
+  x = x_hidden,
+  y = y_train,
+  alpha = 1,     
+  foldid = foldid 
+)
+
+cv_elastic_net_list <- fit_elastic_net_4B(x_hidden, y_train, foldid, alpha_grid)
+
+plot_cross_validation_error(cv_ridge, NULL, "Cross Validation Error of Ridge")
+plot_nonzero_slopes_4B(cv_ridge$glmnet.fit, NULL, "Number of Active Hidden Features of Ridge")
+
+plot_cross_validation_error(cv_lasso, NULL, "Cross Validation Error of Lasso")
+plot_nonzero_slopes_4B(cv_lasso$glmnet.fit, NULL, "Number of Active Hidden Features of Lasso")
+
+for (alpha in names(cv_elastic_net_list)) {
+  fit <- cv_elastic_net_list[[alpha]]$glmnet.fit
+  print(plot_nonzero_slopes_4B(fit, alpha, "Number of Non-Zero Slopes of Elastic Net"))
+}
+
+for (alpha in names(cv_elastic_net_list)) {
+  fit <- cv_elastic_net_list[[alpha]]
+  print(plot_cross_validation_error(fit, alpha, "Cross-Validation Error of Elastic Net"))
+}
+
+cv_results <- tibble::tibble(
+  alpha = numeric(),
+  lambda = numeric(),
+  cv_error = numeric()
+)
+
+for (alpha in names(cv_elastic_net_list)) {
+  fit <- cv_elastic_net_list[[alpha]]
+  idx <- which(fit$lambda == fit$lambda.min)
+  error <- fit$cvm[idx]
+  cv_results <- dplyr::add_row(
+    cv_results,
+    alpha = as.numeric(alpha),
+    lambda = fit$lambda.min,
+    cv_error = error
+  )
+}
+
+best_elastic_net_param_4C <- cv_results |> dplyr::slice_min(cv_error, n=1)
+best_elastic_net_param_4C <- best_elastic_net_param_4C[1, ]
+best_elastic_net_model_4C <- cv_elastic_net_list[[as.character(
+  best_elastic_net_param_4C$alpha
+)]]$glmnet.fit
+
+best_ridge_model_4C <- cv_ridge
+best_lasso_model_4C <- cv_lasso
+
 ```
 
 *State which weights are fixed, which are learned, and how active features are counted.*
@@ -327,6 +650,16 @@ M <- 200L
 ```{r final-holdout-evaluation, eval=FALSE}
 # This must be the first analysis chunk that uses y_test for evaluation.
 # Generate all fixed candidate predictions and one RMSE/MAE table here.
+
+MAE <- function(actual, predicted) {
+  mean(abs(actual - predicted))
+}
+
+RMSE <- function(actual, predicted) {
+  sqrt(mean((actual - predicted)^2))
+}
+
+
 ```
 
 *State whether the holdout evidence supports the predeclared choice. Do not retune.*
