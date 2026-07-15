@@ -282,17 +282,11 @@ y_test_locked <- analysis_data[
     drop = TRUE
 ]
 
-# Apply the fixed transformation map to predictors. (only change age as per newest decision)
+# Apply the fixed transformation map to predictors.
+# Under the current rule, only age is changed.
 transform_predictors <- function(x) {
     transformed <- x
     transformed$age <- x$age^2
-    transformed$lbph <- transformed$lpbh
-    transformed$lcavol <- x$lcavol
-    transformed$lcp <- transformed$lcp
-    transformed$lweight <- x$lweight
-    transformed$pgg45 <- transformed$pgg45
-    transformed$gleason <- x$gleason
-    transformed$svi <- x$svi
     transformed
 }
 
@@ -321,6 +315,127 @@ x_test <- apply_scaler(
     x_test_transformed,
     x_prep
 )
+
+# ---------------------------------------------------------
+# Generate second-order features and fit exploratory models
+# ---------------------------------------------------------
+# x_train already contains the training-derived transformations
+# and scaling. Therefore every main effect, interaction, and
+# quadratic feature below is generated after preprocessing.
+
+nonlinear_model_data <- as.data.frame(
+    x_train
+)
+
+nonlinear_model_data$y <- y_train
+
+additive_formula <- y ~
+    lcavol +
+    lweight +
+    age +
+    lbph +
+    svi +
+    lcp +
+    gleason +
+    pgg45
+
+second_order_formula <- y ~ (
+    lcavol +
+    lweight +
+    age +
+    lbph +
+    svi +
+    lcp +
+    gleason +
+    pgg45
+)^2 +
+    I(lcavol^2) +
+    I(lweight^2) +
+    I(age^2) +
+    I(lbph^2) +
+    I(lcp^2) +
+    I(gleason^2) +
+    I(pgg45^2)
+
+# This matrix makes the generated feature set explicit.
+# svi^2 is omitted because scaled svi still has only two values,
+# so its square is redundant with the intercept and svi.
+second_order_feature_matrix <- stats::model.matrix(
+    second_order_formula,
+    data = nonlinear_model_data
+)
+
+additive_ols_model <- stats::lm(
+    formula = additive_formula,
+    data = nonlinear_model_data
+)
+
+quadratic_ols_model <- stats::lm(
+    formula = second_order_formula,
+    data = nonlinear_model_data
+)
+
+# Compare the nested models using a training-only partial F-test.
+nonlinear_model_test <- stats::anova(
+    additive_ols_model,
+    quadratic_ols_model
+)
+
+nonlinear_model_test_table <- nonlinear_model_test |>
+    as.data.frame() |>
+    tibble::rownames_to_column(
+        var = "model"
+    ) |>
+    dplyr::mutate(
+        model = c(
+            "Additive OLS",
+            "Second-order OLS"
+        )
+    )
+
+quadratic_coefficient_table <- broom::tidy(
+    quadratic_ols_model,
+    conf.int = TRUE,
+    conf.level = 0.95
+) |>
+    dplyr::mutate(
+        significant_at_005 =
+            !is.na(p.value) &
+            p.value < 0.05
+    )
+
+nonlinear_model_summary <- dplyr::bind_rows(
+    broom::glance(
+        additive_ols_model
+    ) |>
+        dplyr::mutate(
+            model = "Additive OLS",
+            .before = 1
+        ),
+    broom::glance(
+        quadratic_ols_model
+    ) |>
+        dplyr::mutate(
+            model = "Second-order OLS",
+            .before = 1
+        )
+) |>
+    dplyr::select(
+        model,
+        r.squared,
+        adj.r.squared,
+        sigma,
+        df,
+        df.residual,
+        AIC,
+        BIC,
+        nobs
+    )
+
+aliased_quadratic_terms <- quadratic_coefficient_table |>
+    dplyr::filter(
+        is.na(estimate)
+    )
 
 # Create one shared five-fold assignment for all training comparisons.
 foldid <- make_foldid(
@@ -1183,98 +1298,12 @@ readr::write_csv(
 )
 
 # ---------------------------------------------------------
-# 10. Exploratory nonlinear-relationship check
+# 10. Exploratory nonlinear-model results
 #
-# Compare:
-# 1. additive OLS model;
-# 2. full second-order OLS model.
-#
-# Training observations only.
+# The models and their second-order features were created in 1B
+# after the transformations and training-only scaling were applied.
+# This section only displays and exports the model results.
 # ---------------------------------------------------------
-
-# Standardize the raw training predictors separately for this
-# exploratory comparison. This prevents existing transformations,
-# such as age -> age^2, from being squared again.
-
-nonlinear_scaler <- fit_scaler(
-    x_train_raw
-)
-
-x_train_nonlinear <- apply_scaler(
-    x_train_raw,
-    nonlinear_scaler
-)
-
-nonlinear_model_data <- as.data.frame(
-    x_train_nonlinear
-)
-
-nonlinear_model_data$y <- y_train
-
-
-# Additive reference model.
-
-additive_ols_model <- stats::lm(
-    y ~
-        lcavol +
-        lweight +
-        age +
-        lbph +
-        svi +
-        lcp +
-        gleason +
-        pgg45,
-    data = nonlinear_model_data
-)
-
-
-# Full second-order model:
-# - all main effects;
-# - all pairwise interactions;
-# - quadratic terms for nonbinary predictors.
-#
-# I(svi^2) is omitted because svi is binary, so svi^2 = svi.
-
-quadratic_ols_model <- stats::lm(
-    y ~ (
-        lcavol +
-        lweight +
-        age +
-        lbph +
-        svi +
-        lcp +
-        gleason +
-        pgg45
-    )^2 +
-        I(lcavol^2) +
-        I(lweight^2) +
-        I(age^2) +
-        I(lbph^2) +
-        I(lcp^2) +
-        I(gleason^2) +
-        I(pgg45^2),
-    data = nonlinear_model_data
-)
-
-
-# Compare the nested models using a partial F-test.
-
-nonlinear_model_test <- stats::anova(
-    additive_ols_model,
-    quadratic_ols_model
-)
-
-nonlinear_model_test_table <- nonlinear_model_test |>
-    as.data.frame() |>
-    tibble::rownames_to_column(
-        var = "model"
-    ) |>
-    dplyr::mutate(
-        model = c(
-            "Additive OLS",
-            "Second-order OLS"
-        )
-    )
 
 knitr::kable(
     nonlinear_model_test_table,
@@ -1294,19 +1323,6 @@ readr::write_csv(
 )
 
 
-# Export the second-order model coefficients.
-
-quadratic_coefficient_table <- broom::tidy(
-    quadratic_ols_model,
-    conf.int = TRUE,
-    conf.level = 0.95
-) |>
-    dplyr::mutate(
-        significant_at_005 =
-            !is.na(p.value) &
-            p.value < 0.05
-    )
-
 knitr::kable(
     quadratic_coefficient_table,
     digits = 4,
@@ -1317,40 +1333,10 @@ readr::write_csv(
     quadratic_coefficient_table,
     file = file.path(
         table_directory,
-        "quadratic_ols_coefficients.csv"
+        "10. quadratic_ols_coefficients.csv"
     )
 )
 
-
-# Report model sizes and training fit.
-
-nonlinear_model_summary <- dplyr::bind_rows(
-    broom::glance(
-        additive_ols_model
-    ) |>
-        dplyr::mutate(
-            model = "Additive OLS",
-            .before = 1
-        ),
-    broom::glance(
-        quadratic_ols_model
-    ) |>
-        dplyr::mutate(
-            model = "Second-order OLS",
-            .before = 1
-        )
-) |>
-    dplyr::select(
-        model,
-        r.squared,
-        adj.r.squared,
-        sigma,
-        df,
-        df.residual,
-        AIC,
-        BIC,
-        nobs
-    )
 
 knitr::kable(
     nonlinear_model_summary,
@@ -1366,13 +1352,6 @@ readr::write_csv(
     )
 )
 
-
-# Check whether any coefficients could not be estimated.
-
-aliased_quadratic_terms <- quadratic_coefficient_table |>
-    dplyr::filter(
-        is.na(estimate)
-    )
 
 if (nrow(aliased_quadratic_terms) > 0L) {
     message(
@@ -1398,22 +1377,30 @@ save_table_png <- function(
     display_data <- data |>
         dplyr::mutate(
             dplyr::across(
-                dplyr::where(is.numeric),
+                dplyr::everything(),
                 function(x) {
-                    dplyr::if_else(
+                    if (is.numeric(x)) {
+                        return(
+                            ifelse(
+                                is.na(x),
+                                "",
+                                formatC(
+                                    x,
+                                    format = "g",
+                                    digits = 4
+                                )
+                            )
+                        )
+                    }
+
+                    ifelse(
                         is.na(x),
                         "",
-                        formatC(
-                            x,
-                            format = "g",
-                            digits = 4
+                        as.character(
+                            x
                         )
                     )
                 }
-            ),
-            dplyr::across(
-                !dplyr::where(is.numeric),
-                as.character
             )
         ) |>
         dplyr::mutate(
