@@ -242,6 +242,51 @@ knitr::kable(
 ## 1B. Split and train-only preprocessing
 
 ```{r split-and-scale}
+
+add_nonlinear_features <- function(x) {
+  x <- as.matrix(x)
+  p <- ncol(x)
+  n_rows <- nrow(x)
+  col_names <- colnames(x)
+  if (is.null(col_names)) {
+    col_names <- paste0("V", seq_len(p))
+  }
+  
+  # 1. Calculate the number of non-linear terms
+  # p squared terms + p*(p-1)/2 interaction terms
+  num_nonlinear <- p + (p * (p - 1)) / 2
+  
+  # 2. Pre-allocate the non-linear matrix for performance
+  non_linear_mat <- matrix(NA, nrow = n_rows, ncol = num_nonlinear)
+  non_linear_names <- character(num_nonlinear)
+  
+  col_idx <- 1
+  
+  # 3. Generate squared terms (x_i ^ 2)
+  for (i in seq_len(p)) {
+    non_linear_mat[, col_idx] <- x[, i]^2
+    non_linear_names[col_idx] <- paste0(col_names[i], "_sq")
+    col_idx <- col_idx + 1
+  }
+  
+  # 4. Generate cross-interaction terms (x_i * x_j)
+  if (p > 1) {
+    for (i in seq_len(p - 1)) {
+      for (j in (i + 1):p) {
+        non_linear_mat[, col_idx] <- x[, i] * x[, j]
+        non_linear_names[col_idx] <- paste0(col_names[i], "_x_", col_names[j])
+        col_idx <- col_idx + 1
+      }
+    }
+  }
+  
+  # Assign column names to the non-linear matrix
+  colnames(non_linear_mat) <- non_linear_names
+  
+  # 5. Combine the original linear matrix and the new non-linear matrix
+  cbind(x, non_linear_mat)
+}
+
 # Split once using the declared group-specific seed.
 split <- split_rows(
     n = nrow(analysis_data),
@@ -256,71 +301,30 @@ stopifnot(
     length(intersect(train_id, test_id)) == 0L
 )
 
-# Preserve unprocessed train/test objects for training-only exploration.
-x_train_raw <- analysis_data[
-    train_id,
-    predictors,
-    drop = FALSE
-]
+x_raw <- as.matrix(analysis_data[, predictors, drop = FALSE])
+y_raw <- analysis_data[[config$response]]
 
-x_test_raw <- analysis_data[
-    test_id,
-    predictors,
-    drop = FALSE
-]
+x_raw_nonlinear <- add_nonlinear_features(x_raw)
 
-y_train_raw <- analysis_data[
-    train_id,
-    config$response,
-    drop = TRUE
-]
+x_prep <- fit_scaler(x_raw_nonlinear[train_id, , drop = FALSE])
+x_raw_nonlinear_scaled <- apply_scaler(x_raw_nonlinear, x_prep)
 
-# Keep the supplied holdout response locked on its original lpsa scale.
-y_test_locked <- analysis_data[
-    test_id,
-    config$response,
-    drop = TRUE
-]
+x_prep <- fit_scaler(x_raw[train_id, , drop = FALSE])
+x_raw_scaled <- apply_scaler(x_raw, x_prep)
 
-# Apply the fixed transformation map to predictors. (only change age as per newest decision)
-transform_predictors <- function(x) {
-    transformed <- x
-    transformed$age <- x$age^2
-    transformed$lbph <- transformed$lpbh
-    transformed$lcavol <- x$lcavol
-    transformed$lcp <- transformed$lcp
-    transformed$lweight <- x$lweight
-    transformed$pgg45 <- transformed$pgg45
-    transformed$gleason <- x$gleason
-    transformed$svi <- x$svi
-    transformed
-}
+#official data
 
-x_train_transformed <- transform_predictors(x_train_raw)
-x_test_transformed <- transform_predictors(x_test_raw)
+#non linear data
+x_train_nonlinear <- x_raw_nonlinear_scaled[train_id, , drop = FALSE]
+x_test_nonlinear <- x_raw_nonlinear_scaled[test_id, , drop = FALSE]
+y_train_nonlinear <- y_raw[train_id]
+y_test_nonlinear <- y_raw[test_id]
 
-# Transform the training response from log(PSA) to sqrt(PSA).
-# Reuse this function on y_test_locked only in the final evaluation chunk.
-transform_response <- function(y) {
-    exp(y / 2)
-}
-
-y_train <- transform_response(y_train_raw)
-
-# Fit preprocessing constants on transformed training predictors only.
-x_prep <- fit_scaler(
-    x_train_transformed
-)
-
-x_train <- apply_scaler(
-    x_train_transformed,
-    x_prep
-)
-
-x_test <- apply_scaler(
-    x_test_transformed,
-    x_prep
-)
+#linear data
+x_train <- x_raw_scaled[train_id, , drop = FALSE]
+x_test <- x_raw_scaled[test_id, , drop = FALSE]
+y_train <- y_raw[train_id]
+y_test <- y_raw[test_id]
 
 # Create one shared five-fold assignment for all training comparisons.
 foldid <- make_foldid(
@@ -329,33 +333,7 @@ foldid <- make_foldid(
     seed = seeds$cv
 )
 
-cat("\nFold sizes:\n")
-print(table(foldid))
 
-# Record the fixed rules used by the pipeline.
-transformation_record <- tibble::tibble(
-    variable = c(predictors, config$response),
-    role = c(rep("predictor", length(predictors)), "response")
-) |>
-    dplyr::mutate(
-        transformation = dplyr::case_when(
-            variable == "age" ~ "x^2",
-            variable == "lbph" ~ "none",
-            variable == "lcavol" ~ "none",
-            variable == "lcp" ~ "none",
-            variable == "lweight" ~ "none",
-            variable == "pgg45" ~ "none",
-            variable == "gleason" ~ "none",
-            variable == "svi" ~ "none",
-            variable == "lpsa" ~ "exp(x / 2) = sqrt(PSA)",
-            TRUE ~ "none"
-        )
-    )
-
-knitr::kable(
-    transformation_record,
-    caption = "Fixed transformation rules"
-)
 ```
 
 *Report seeds, dimensions, scaling, folds, and leakage safeguards.*
@@ -391,267 +369,16 @@ dir.create(
     showWarnings = FALSE
 )
 
+x_train_raw <- x_raw[train_id, , drop = FALSE]
+y_train_raw <- y_raw[train_id]
 
 # ---------------------------------------------------------
-# Helper function
+# 1. All predictors distribution (raw)
 # ---------------------------------------------------------
 
-sample_skewness <- function(x) {
-    x <- x[is.finite(x)]
-    n <- length(x)
-
-    if (n < 3L) {
-        return(NA_real_)
-    }
-
-    standard_deviation <- stats::sd(x)
-
-    if (
-        !is.finite(standard_deviation) ||
-        standard_deviation == 0
-    ) {
-        return(NA_real_)
-    }
-
-    standardized <- (
-        x - mean(x)
-    ) / standard_deviation
-
-    n / (
-        (n - 1) * (n - 2)
-    ) * sum(standardized^3)
-}
-
-
-# ---------------------------------------------------------
-# Variable groups
-# ---------------------------------------------------------
-
-continuous_predictors <- predictors[
-    vapply(
-        x_train_raw,
-        function(x) {
-            is.numeric(x) &&
-                dplyr::n_distinct(
-                    x,
-                    na.rm = TRUE
-                ) > 5L
-        },
-        logical(1)
-    )
-]
-
-discrete_predictors <- intersect(
-    c(
-        "svi",
-        "gleason"
-    ),
-    predictors
-)
-
-# Age is shown separately in the transformation comparison.
-continuous_predictors_as_is <- setdiff(
-    continuous_predictors,
-    "age"
-)
-
-
-# ---------------------------------------------------------
-# 1. Response before and after transformation
-# ---------------------------------------------------------
-
-response_plot_data <- dplyr::bind_rows(
-    tibble::tibble(
-        version = "Before: lpsa",
-        value = y_train_raw
-    ),
-    tibble::tibble(
-        version = "After: sqrt(PSA)",
-        value = y_train
-    )
-) |>
-    dplyr::mutate(
-        version = factor(
-            version,
-            levels = c(
-                "Before: lpsa",
-                "After: sqrt(PSA)"
-            )
-        )
-    )
-
-response_transformation_plot <- ggplot2::ggplot(
-    response_plot_data,
-    ggplot2::aes(x = value)
-) +
-    ggplot2::geom_histogram(
-        bins = 20,
-        fill = "steelblue",
-        color = "white"
-    ) +
-    ggplot2::facet_wrap(
-        ~ version,
-        scales = "free",
-        ncol = 2
-    ) +
-    ggplot2::labs(
-        title = "Response before and after transformation",
-        subtitle = paste(
-            "Training observations only;",
-            "sqrt(PSA) = exp(lpsa / 2)"
-        ),
-        x = NULL,
-        y = "Count"
-    ) +
-    ggplot2::theme_minimal()
-
-print(response_transformation_plot)
-
-ggplot2::ggsave(
-    filename = file.path(
-        plot_directory,
-        "1. response_transformation_comparison.png"
-    ),
-    plot = response_transformation_plot,
-    width = 9,
-    height = 5,
-    units = "in",
-    dpi = 300,
-    bg = "white"
-)
-
-
-# ---------------------------------------------------------
-# 2. Age before and after transformation
-# ---------------------------------------------------------
-
-age_plot_data <- dplyr::bind_rows(
-    tibble::tibble(
-        version = "Before: age",
-        value = x_train_raw$age
-    ),
-    tibble::tibble(
-        version = "After: age^2",
-        value = x_train_transformed$age
-    )
-) |>
-    dplyr::mutate(
-        version = factor(
-            version,
-            levels = c(
-                "Before: age",
-                "After: age^2"
-            )
-        )
-    )
-
-age_transformation_plot <- ggplot2::ggplot(
-    age_plot_data,
-    ggplot2::aes(x = value)
-) +
-    ggplot2::geom_histogram(
-        bins = 20,
-        fill = "steelblue",
-        color = "white"
-    ) +
-    ggplot2::facet_wrap(
-        ~ version,
-        scales = "free_x",
-        ncol = 2
-    ) +
-    ggplot2::labs(
-        title = "Age before and after transformation",
-        subtitle = "Training observations only",
-        x = NULL,
-        y = "Count"
-    ) +
-    ggplot2::theme_minimal()
-
-print(age_transformation_plot)
-
-ggplot2::ggsave(
-    filename = file.path(
-        plot_directory,
-        "2. age_transformation_comparison.png"
-    ),
-    plot = age_transformation_plot,
-    width = 9,
-    height = 5,
-    units = "in",
-    dpi = 300,
-    bg = "white"
-)
-
-
-# ---------------------------------------------------------
-# 3. Skewness comparison for age and response only
-# ---------------------------------------------------------
-
-transformation_skewness_table <- tibble::tibble(
-    variable = c(
-        "age",
-        "response"
-    ),
-    transformation = c(
-        "age^2",
-        "exp(lpsa / 2) = sqrt(PSA)"
-    ),
-    original_skewness = c(
-        sample_skewness(
-            x_train_raw$age
-        ),
-        sample_skewness(
-            y_train_raw
-        )
-    ),
-    transformed_skewness = c(
-        sample_skewness(
-            x_train_transformed$age
-        ),
-        sample_skewness(
-            y_train
-        )
-    )
-) |>
-    dplyr::mutate(
-        original_absolute_skewness =
-            abs(original_skewness),
-        transformed_absolute_skewness =
-            abs(transformed_skewness),
-        absolute_skewness_reduction =
-            original_absolute_skewness -
-            transformed_absolute_skewness,
-        result = dplyr::if_else(
-            absolute_skewness_reduction > 0,
-            "Reduced absolute skewness",
-            "Did not reduce absolute skewness"
-        )
-    )
-
-knitr::kable(
-    transformation_skewness_table,
-    digits = 3,
-    caption = "Age and response skewness before and after transformation"
-)
-
-readr::write_csv(
-    transformation_skewness_table,
-    file = file.path(
-        table_directory,
-        "3. transformation_skewness_comparison.csv"
-    )
-)
-
-
-# ---------------------------------------------------------
-# 4. Remaining continuous predictors on supplied scales
-# ---------------------------------------------------------
-
-original_continuous_plot_data <- x_train_raw |>
+all_plot_data <- as.data.frame(x_train_raw) |>
     dplyr::select(
-        dplyr::all_of(
-            continuous_predictors_as_is
-        )
+        dplyr::all_of(predictors)
     ) |>
     tidyr::pivot_longer(
         cols = dplyr::everything(),
@@ -659,121 +386,35 @@ original_continuous_plot_data <- x_train_raw |>
         values_to = "value"
     )
 
-original_continuous_predictor_plot <- ggplot2::ggplot(
-    original_continuous_plot_data,
+all_predictor_plot <- ggplot2::ggplot(
+    all_plot_data,
     ggplot2::aes(x = value)
 ) +
     ggplot2::geom_histogram(
         bins = 20,
         fill = "steelblue",
-        color = "white"
+        color = "white",
+        na.rm = TRUE  # Quietly ignore any missing values
     ) +
     ggplot2::facet_wrap(
         ~ variable,
-        scales = "free_x",
-        ncol = 3
+        scales = "free",  # "free" frees both x and y axes for varying scales
+        ncol = 3          # Adjust number of columns as needed
     ) +
     ggplot2::labs(
-        title = "Original continuous predictor distributions",
-        subtitle = paste(
-            "Training observations only;",
-            "age is shown separately"
-        ),
-        x = NULL,
-        y = "Count"
-    ) +
-    ggplot2::theme_minimal()
-
-print(original_continuous_predictor_plot)
-
-ggplot2::ggsave(
-    filename = file.path(
-        plot_directory,
-        "4. original_continuous_predictor_distributions.png"
-    ),
-    plot = original_continuous_predictor_plot,
-    width = 9,
-    height = 6,
-    units = "in",
-    dpi = 300,
-    bg = "white"
-)
-
-
-# ---------------------------------------------------------
-# 5. Discrete predictors on supplied scales
-# ---------------------------------------------------------
-
-discrete_plot_data <- x_train_raw |>
-    dplyr::select(
-        dplyr::all_of(
-            discrete_predictors
-        )
-    ) |>
-    tidyr::pivot_longer(
-        cols = dplyr::everything(),
-        names_to = "variable",
-        values_to = "value"
-    ) |>
-    dplyr::count(
-        variable,
-        value,
-        name = "count"
-    )
-
-original_discrete_predictor_plot <- ggplot2::ggplot(
-    discrete_plot_data,
-    ggplot2::aes(
-        x = factor(value),
-        y = count
-    )
-) +
-    ggplot2::geom_col(
-        fill = "steelblue",
-        color = "white"
-    ) +
-    ggplot2::facet_wrap(
-        ~ variable,
-        scales = "free_x"
-    ) +
-    ggplot2::labs(
-        title = "Original discrete predictor distributions",
-        subtitle = "Training observations only",
+        title = "Predictor distributions from raw data",
         x = "Predictor value",
-        y = "Count"
+        y = "Frequency"
     ) +
     ggplot2::theme_minimal()
 
-print(original_discrete_predictor_plot)
-
-ggplot2::ggsave(
-    filename = file.path(
-        plot_directory,
-        "5. original_discrete_predictor_distributions.png"
-    ),
-    plot = original_discrete_predictor_plot,
-    width = 7,
-    height = 5,
-    units = "in",
-    dpi = 300,
-    bg = "white"
-)
-
+print(all_predictor_plot)
 
 # ---------------------------------------------------------
-# 6. Training correlation table
+# 2. Training correlation table
 # ---------------------------------------------------------
 
-correlation_data <- x_train_transformed |>
-    dplyr::mutate(
-        response = y_train,
-        .before = 1
-    )
-
-correlation_matrix <- stats::cor(
-    correlation_data,
-    use = "complete.obs"
-)
+correlation_matrix <- cor(cbind(x_train_raw, y_train_raw), use = "complete.obs")
 
 knitr::kable(
     round(correlation_matrix, 3),
@@ -783,26 +424,70 @@ knitr::kable(
     )
 )
 
-readr::write_csv(
-    tibble::as_tibble(
-        correlation_matrix,
-        rownames = "variable"
-    ),
-    file = file.path(
-        table_directory,
-        "6. training_correlation_matrix.csv"
+correlation_df <- as.data.frame(correlation_matrix) |>
+    tibble::rownames_to_column(var = "row_predictor") |>
+    tidyr::pivot_longer(
+        cols = -row_predictor,
+        names_to = "column_predictor",
+        values_to = "value"
+    ) |>
+    dplyr::mutate(
+        displayed_value = sprintf("%.3f", value) # 3 decimals to match your kable
     )
-)
 
+# 2. Plot as a clean table-like grid
+table_plot <- ggplot2::ggplot(
+    correlation_df,
+    ggplot2::aes(x = column_predictor, y = row_predictor)
+) +
+    # Draw clean white cells with light grey borders
+    ggplot2::geom_tile(
+        fill = "white",
+        color = "grey85",
+        linewidth = 0.8
+    ) +
+    # Add the correlation numbers
+    ggplot2::geom_text(
+        ggplot2::aes(label = displayed_value),
+        color = "grey10",
+        size = 3.5
+    ) +
+    ggplot2::coord_equal() +
+    ggplot2::labs(
+        title = "Correlation Matrix Table of Raw Data",
+        x = NULL,
+        y = NULL
+    ) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+        panel.grid = ggplot2::element_blank(),
+        # Make row/column names bold and crisp
+        axis.text.x = ggplot2::element_text(
+            angle = 45,
+            hjust = 1,
+            vjust = 1,
+            face = "bold",
+            color = "grey20"
+        ),
+        axis.text.y = ggplot2::element_text(
+            face = "bold",
+            color = "grey20"
+        ),
+        plot.title = ggplot2::element_text(face = "bold", size = 14),
+        plot.subtitle = ggplot2::element_text(color = "grey40")
+    )
+
+# Print and save
+print(table_plot)
 
 # ---------------------------------------------------------
-# 7. Predictor-response relationship
+# 3. Predictor-response relationship
 # ---------------------------------------------------------
 # Extract correlations between every predictor and the response.
 
-predictor_response_plot_data <- x_train_transformed |>
+predictor_response_plot_data <- as.data.frame(x_train_raw) |>
     dplyr::mutate(
-        response = y_train
+        response = y_train_raw
     ) |>
     tidyr::pivot_longer(
         cols = -response,
@@ -907,149 +592,6 @@ ggplot2::ggsave(
     bg = "white"
 )
 
-
-# Export the correlations used in the facet labels.
-
-readr::write_csv(
-    predictor_response_correlations,
-    file = file.path(
-        table_directory,
-        "predictor_response_correlations.csv"
-    )
-)
-
-# ---------------------------------------------------------
-# 7.5. Pairwise feature covariance matrix
-# ---------------------------------------------------------
-
-feature_covariance_matrix <- stats::cov(
-    x_train_transformed,
-    use = "complete.obs"
-)
-
-
-# Convert the matrix to a table for display and CSV export.
-
-feature_covariance_table <- feature_covariance_matrix |>
-    as.data.frame() |>
-    tibble::rownames_to_column(
-        var = "predictor"
-    )
-
-knitr::kable(
-    feature_covariance_table,
-    digits = 3,
-    caption = paste(
-        "Pairwise covariance matrix of transformed",
-        "training predictors"
-    )
-)
-
-
-# Export the covariance matrix to CSV.
-
-readr::write_csv(
-    feature_covariance_table,
-    file = file.path(
-        table_directory,
-        "feature_covariance_matrix.csv"
-    )
-)
-
-
-# Convert the covariance matrix to long format for PNG output.
-
-covariance_image_data <- as.data.frame(
-    as.table(
-        feature_covariance_matrix
-    )
-) |>
-    tibble::as_tibble() |>
-    dplyr::rename(
-        row_predictor = Var1,
-        column_predictor = Var2,
-        covariance = Freq
-    ) |>
-    dplyr::mutate(
-        row_predictor = factor(
-            row_predictor,
-            levels = rev(
-                rownames(feature_covariance_matrix)
-            )
-        ),
-        column_predictor = factor(
-            column_predictor,
-            levels = colnames(
-                feature_covariance_matrix
-            )
-        ),
-        displayed_value = formatC(
-            covariance,
-            format = "g",
-            digits = 3
-        )
-    )
-
-
-# Create a table-like image.
-
-covariance_table_plot <- ggplot2::ggplot(
-    covariance_image_data,
-    ggplot2::aes(
-        x = column_predictor,
-        y = row_predictor
-    )
-) +
-    ggplot2::geom_tile(
-        fill = "white",
-        color = "grey60",
-        linewidth = 0.5
-    ) +
-    ggplot2::geom_text(
-        ggplot2::aes(
-            label = displayed_value
-        ),
-        size = 3
-    ) +
-    ggplot2::coord_equal() +
-    ggplot2::labs(
-        title = "Pairwise feature covariance matrix",
-        subtitle = "Transformed training predictors",
-        x = NULL,
-        y = NULL
-    ) +
-    ggplot2::theme_minimal() +
-    ggplot2::theme(
-        panel.grid = ggplot2::element_blank(),
-        axis.text.x = ggplot2::element_text(
-            angle = 45,
-            hjust = 1,
-            face = "bold"
-        ),
-        axis.text.y = ggplot2::element_text(
-            face = "bold"
-        )
-    )
-
-print(
-    covariance_table_plot
-)
-
-
-# Save the table as PNG.
-
-ggplot2::ggsave(
-    filename = file.path(
-        plot_directory,
-        "7.5_feature_covariance_matrix.png"
-    ),
-    plot = covariance_table_plot,
-    width = 9,
-    height = 8,
-    units = "in",
-    dpi = 300,
-    bg = "white"
-)
 
 # ---------------------------------------------------------
 # 8. Possible anomaly
