@@ -1,17 +1,17 @@
 ---
 title: "ASESII 24A02 Project-Based Quiz 1"
 subtitle: "Ridge, Lasso, and Regularization for Neural Features"
-author: "Group 02: Nguyễn Thanh An - 24125024, Nguyễn Chí Bảo - 24125025, Trần Nguyễn Khánh Bình - 24125026, Phạm Văn Trang - 24125046, Quách Thiên Lạc - 24125092"
+author: "Group 02: Nguyễn Thanh An - 24125024, Nguyễn Chí Bảo - 24125025, Trần Nguyễn Khánh Bình - 24125026, Phạm Vân Trang - 24125046, Quách Thiên Lạc - 24125092"
 date: "`r format(Sys.Date(), '%Y-%m-%d')`"
 output:
+  html_document:
+    toc: true
+    toc_depth: 3
   pdf_document:
     toc: true
     number_sections: true
     latex_engine: xelatex
     fig_crop: false
-  html_document:
-    toc: true
-    toc_depth: 3
 bibliography: references.bib
 link-citations: true
 params:
@@ -20,31 +20,32 @@ fontsize: 11pt
 geometry: margin=1in
 ---
 
+```{=html}
 <!--
 Copy this template into your group submission folder, rename it
 Group02_ProjectQuiz1.Rmd, place references.bib beside it, and set the group
 number parameter before rendering. Remove instructional comments from the
 final report.
 -->
+```
 
-# Authorship and contribution statement {-}
+# Authorship and contribution statement {.unnumbered}
 
 We confirm that every group member can explain the submitted analysis. AI use is reported in `Group02_AI_Log.csv`, and the group checked every AI-assisted item used in this report.
 
-| Student | ID | Main contributions | Verification performed |
-|---|---|---|---|
-| Nguyễn Thanh An        | 24125024 |---|---|
-| Nguyễn Chí Bảo         | 24125025 |---|---|
-| Trần Nguyễn Khánh Bình | 24125026 |---|---|
-| Phạm Văn Trang         | 24125046 |---|---|
-| Quách Thiên Lạc        | 24125092 |---|---|
+| Student                | ID       | Main contributions | Verification performed |
+|-------------------|-----------------|-----------------|-------------------|
+| Nguyễn Thanh An        | 24125024 | ---                | ---                    |
+| Nguyễn Chí Bảo         | 24125025 | ---                | ---                    |
+| Trần Nguyễn Khánh Bình | 24125026 | ---                | ---                    |
+| Phạm Văn Trang         | 24125046 | ---                | ---                    |
+| Quách Thiên Lạc        | 24125092 | ---                | ---                    |
 
-
-# Abstract {-}
+# Abstract {.unnumbered}
 
 *Maximum 150 words: prediction problem, methods, main evidence, and recommendation.*
 
-# Reproducible setup {-}
+# Reproducible setup {.unnumbered}
 
 ```{r setup, message=FALSE, warning=FALSE}
 required_packages <- c("tidyverse", "glmnet", "broom", "knitr")
@@ -76,7 +77,7 @@ seeds <- list(
 )
 ```
 
-## Shared helper functions {-}
+## Shared helper functions {.unnumbered}
 
 ```{r helpers}
 find_exam_data <- function(filename) {
@@ -1120,14 +1121,590 @@ cat(
 ## 2A. OLS baseline
 
 ```{r ols, eval=FALSE}
-# Fit OLS on x_train and y_train. Do not access y_test here.
+# Helper functions
+
+# Cross-validation function for OLS
+
+fit_cv_ols <- function(x, y, foldid) {
+
+  folds <- sort(unique(foldid))
+
+  fold_metrics <- vector("list", length(folds))
+
+  for (i in seq_along(folds)) {
+
+    train_index <- foldid != folds[i]
+    valid_index <- foldid == folds[i]
+
+    train_data <- data.frame(
+      y = y[train_index],
+      x[train_index, , drop = FALSE]
+    )
+
+    valid_data <- data.frame(
+      x[valid_index, , drop = FALSE]
+    )
+
+    fit <- lm(
+      y ~ .,
+      data = train_data
+    )
+
+    prediction <- predict(
+      fit,
+      newdata = valid_data
+    )
+
+    fold_metrics[[i]] <- score_regression(
+      y = y[valid_index],
+      prediction = prediction
+    )
+  }
+
+  fold_metrics <- do.call(rbind, fold_metrics)
+
+  list(
+    fold_metrics = fold_metrics,
+    cv_metrics = colMeans(fold_metrics)
+  )
+}
+
+## Step-wise variable selection
+
+ols_stepwise_regression <- function(x_train,
+                                    y_train,
+                                    direction = "both") {
+  
+  df <- as.data.frame(x_train)
+  df$y <- y_train
+  
+  full_model <- lm(
+    y ~ .,
+    data = df
+  )
+  
+  best_model <- step(
+    full_model,
+    direction = direction,
+    trace = 0
+  )
+  
+  return (best_model)
+}
+
+cat('2A.1 Multiple linear Regression\n')
+
+cat('2A.1.1 Without variable selection\n')
+
+linear_df <- data.frame(
+  y = y_train,
+  x= x_train
+)
+
+ols_linear <- lm(
+  y ~ .,
+  data = linear_df
+)
+
+cat('Coefficient:\n')
+
+coef(ols_linear)
+
+cat('Training error:\n')
+
+ols_linear_prediction <- predict(
+  ols_linear,
+  newdata = linear_df
+)
+
+ols_linear_metric <- score_regression(
+  y_train,
+  ols_linear_prediction
+)
+
+ols_linear_metric
+
+cat('Five-fold cross validation:\n')
+
+ols_linear_cv <- fit_cv_ols(
+  x_train,
+  y_train,
+  foldid
+)
+
+ols_linear_cv$fold_metrics
+
+ols_linear_cv$cv_metrics
+
+cat('Fitted and Residual plot:\n')
+
+plot(
+  ols_linear,
+  which = 1
+)
+
+cat('2A.1.2 Using variable selection\n')
+
+ols_linear_vs <- ols_stepwise_regression(
+  x_train, 
+  y_train
+)
+
+selected_variables <- names(coef(ols_linear_vs))
+
+selected_variables <- setdiff(
+  selected_variables,
+  '(Intercept)'
+)
+
+x_train_selected = x_train[, selected_variables, drop = FALSE]
+
+selected_linear_df <- data.frame(
+  y = y_train,
+  x_train_selected
+)
+
+cat('Coefficients:\n')
+
+coef(ols_linear_vs)
+
+cat('Training error:\n')
+
+ols_linear_vs_prediction <- predict(
+  ols_linear_vs,
+  newdata = selected_linear_df
+)
+
+ols_linear_vs_metric <- score_regression(
+  y_train,
+  ols_linear_vs_prediction
+)
+
+ols_linear_vs_metric
+
+cat('Five-fold cross validation:\n')
+
+ols_linear_vs_cv <- fit_cv_ols(
+  x_train_selected,
+  y_train,
+  foldid
+)
+
+ols_linear_vs_cv$fold_metrics
+
+ols_linear_vs_cv$cv_metrics
+
+cat('Fitted and Residual plot:\n')
+
+plot(
+  ols_linear_vs,
+  which = 1
+)
+
+cat('2A.2 Polynomial regression')
+
+cat('2A.2.1 Without variable selection\n')
+
+nonlinear_df <- data.frame(
+  y = y_train_nonlinear,
+  x= x_train_nonlinear
+)
+
+ols_nonlinear <- lm(
+  y ~ .,
+  data = nonlinear_df
+)
+
+cat('Coefficient:\n')
+
+coef(ols_nonlinear)
+
+cat('Training error:\n')
+
+ols_nonlinear_prediction <- predict(
+  ols_nonlinear,
+  newdata = nonlinear_df
+)
+
+ols_nonlinear_metric <- score_regression(
+  y_train,
+  ols_nonlinear_prediction
+)
+
+ols_nonlinear_metric
+
+cat('Five-fold cross validation:\n')
+
+ols_nonlinear_cv <- fit_cv_ols(
+  x_train_nonlinear,
+  y_train_nonlinear,
+  foldid
+)
+
+ols_nonlinear_cv$fold_metrics
+
+ols_nonlinear_cv$cv_metrics
+
+cat('Fitted and Residual plot:\n')
+
+plot(
+  ols_nonlinear,
+  which = 1
+)
+
+cat('2A.1.2 Using variable selection\n')
+
+ols_nonlinear_vs <- ols_stepwise_regression(
+  x_train_nonlinear, 
+  y_train_nonlinear
+)
+
+selected_nonlinear_variables <- names(coef(ols_nonlinear_vs))
+
+selected_nonlinear_variables <- setdiff(
+  selected_nonlinear_variables,
+  '(Intercept)'
+)
+
+x_nonlinear_selected = x_train_nonlinear[, selected_nonlinear_variables, drop = FALSE]
+
+selected_nonlinear_df <- data.frame(
+  y = y_train_nonlinear,
+  x_nonlinear_selected
+)
+
+cat('Coefficients:\n')
+
+coef(ols_nonlinear_vs)
+
+cat('Training error:\n')
+
+ols_nonlinear_vs_prediction <- predict(
+  ols_nonlinear_vs,
+  newdata = selected_nonlinear_df
+)
+
+ols_nonlinear_vs_metric <- score_regression(
+  y_train_nonlinear,
+  ols_nonlinear_vs_prediction
+)
+
+ols_nonlinear_vs_metric
+
+cat('Five-fold cross validation:\n')
+
+ols_nonlinear_vs_cv <- fit_cv_ols(
+  x_nonlinear_selected,
+  y_train_nonlinear,
+  foldid
+)
+
+ols_nonlinear_vs_cv$fold_metrics
+
+ols_nonlinear_vs_cv$cv_metrics
+
+cat('Fitted and Residual plot:\n')
+
+plot(
+  ols_nonlinear_vs,
+  which = 1
+)
+
 ```
 
 ## 2B. Ridge
 
 ```{r ridge, eval=FALSE}
-# Use fit_cv_glmnet(..., alpha = 0, foldid = foldid).
-# Report lambda.min, lambda.1se, paths, coefficients, and CV evidence.
+cat('2B.1 Multiple linear regression\n')
+
+ridge_linear <- fit_cv_glmnet(
+  x = x_train,
+  y = y_train,
+  alpha = 0,
+  foldid = foldid
+)
+
+ridge_linear$lambda.min
+ridge_linear$lambda.1se
+
+cat('Cross-validation curve\n')
+
+plot(
+  ridge_linear,
+  main = "Five-fold Cross-validation Curve for Ridge Regression"
+)
+
+cat('Lambda.min and Lambda.1se\n')
+
+ridge_lambda <- tibble::tibble(
+  tunning_rule = c(
+    "lambda.min",
+    "lambda.1se"
+  ),
+  lambda = c(
+    ridge_linear$lambda.min,
+    ridge_linear$lambda.1se
+  )
+)
+
+knitr::kable(
+  ridge_lambda,
+  digits = 5,
+  caption = "Selected Ridge Penalties"
+)
+
+ridge_linear_coef_min <- tibble::tibble(
+  Variable = rownames(coef(ridge_linear, s = "lambda.min")),
+  Coefficient = as.numeric(
+    coef(ridge_linear, s = "lambda.min")
+  )
+)
+
+ridge_linear_coef_1se <- tibble::tibble(
+  Variable = rownames(coef(ridge_linear, s = "lambda.1se")),
+  Coefficient = as.numeric(
+    coef(ridge_linear, s = "lambda.1se")
+  )
+)
+
+knitr::kable(
+  ridge_linear_coef_min,
+  digits = 4,
+  caption = "Ridge Coefficients (lambda.min)"
+)
+
+knitr::kable(
+  ridge_linear_coef_1se,
+  digits = 4,
+  caption = "Ridge Coefficients (lambda.1se)"
+)
+
+cat('Training errors:\n')
+
+ridge_linear_min_prediction <- predict(
+  ridge_linear,
+  newx = x_train,
+  s = "lambda.min"
+)
+
+ridge_linear_min_metric <- score_regression(
+  y_train,
+  ridge_linear_min_prediction
+)
+
+ridge_linear_1se_prediction <- predict(
+  ridge_linear,
+  newx = x_train,
+  s = "lambda.1se"
+)
+
+ridge_linear_1se_metric <- score_regression(
+  y_train,
+  ridge_linear_1se_prediction
+)
+
+ridge_linear_training_errors <- tibble::tibble(
+  Tuning = c(
+    "lambda.min",
+    "lambda.1se"
+  ),
+  RMSE = c(
+    ridge_linear_min_metric["RMSE"],
+    ridge_linear_1se_metric["MAE"]
+  ),
+  MAE = c(
+    ridge_linear_min_metric["RMSE"],
+    ridge_linear_1se_metric["MAE"]
+  )
+)
+
+knitr::kable(
+  ridge_linear_training_errors,
+  digits = 4,
+  caption = "Ridge Training Error"
+)
+
+cat('Cross-validation errors')
+
+ridge_linear_cv_training_errors <- tibble::tibble(
+  Tunning = c(
+    "lambda.min,
+    lambda.1se"
+  ),
+  Lambda = c(
+    ridge_linear$lambda.min,
+    ridge_linear$lambda.1se
+  ),
+  CV_MSE = c(
+    min(ridge_linear$cvm),
+    ridge_linear$cvm[
+      which.min(
+        abs(ridge_linear$lambda - ridge_linear$lambda.1se)
+      )
+    ]
+  )
+)
+
+knitr::kable(
+  ridge_linear_cv_training_errors,
+  digits = 4,
+  caption = "Cross-validation errors for Ridge Regression"
+)
+
+cat('Coefficient Path:\n')
+
+plot(
+    ridge_linear$glmnet.fit,
+    xvar = "lambda",
+    label = TRUE,
+    main = "Ridge Coefficient Paths"
+)
+
+cat('2B.2 Polynomial linear regression\n')
+
+ridge_nonlinear <- fit_cv_glmnet(
+  x = x_train_nonlinear,
+  y = y_train_nonlinear,
+  alpha = 0,
+  foldid = foldid
+)
+
+ridge_nonlinear$lambda.min
+ridge_nonlinear$lambda.1se
+
+cat('Cross-validation curve\n')
+
+plot(
+  ridge_nonlinear,
+  main = "Five-fold Cross-validation Curve for Ridge Polynomial Regression"
+)
+
+cat('Lambda.min and Lambda.1se\n')
+
+ridge_nonlinear_lambda <- tibble::tibble(
+  tunning_rule = c(
+    "lambda.min",
+    "lambda.1se"
+  ),
+  lambda = c(
+    ridge_nonlinear$lambda.min,
+    ridge_nonlinear$lambda.1se
+  )
+)
+
+knitr::kable(
+  ridge_nonlinear_lambda,
+  digits = 5,
+  caption = "Selected Ridge Penalties"
+)
+
+ridge_nonlinear_coef_min <- tibble::tibble(
+  Variable = rownames(coef(ridge_nonlinear, s = "lambda.min")),
+  Coefficient = as.numeric(
+    coef(ridge_nonlinear, s = "lambda.min")
+  )
+)
+
+ridge_nonlinear_coef_1se <- tibble::tibble(
+  Variable = rownames(coef(ridge_nonlinear, s = "lambda.1se")),
+  Coefficient = as.numeric(
+    coef(ridge_nonlinear, s = "lambda.1se")
+  )
+)
+
+knitr::kable(
+  ridge_nonlinear_coef_min,
+  digits = 4,
+  caption = "Ridge Coefficients (lambda.min)"
+)
+
+knitr::kable(
+  ridge_nonlinear_coef_1se,
+  digits = 4,
+  caption = "Ridge Coefficients (lambda.1se)"
+)
+
+cat('Training errors:\n')
+
+ridge_nonlinear_min_prediction <- predict(
+  ridge_nonlinear,
+  newx = x_train_nonlinear,
+  s = "lambda.min"
+)
+
+ridge_nonlinear_min_metric <- score_regression(
+  y_train,
+  ridge_linear_min_prediction
+)
+
+ridge_nonlinear_1se_prediction <- predict(
+  ridge_nonlinear,
+  newx = x_train_nonlinear,
+  s = "lambda.1se"
+)
+
+ridge_nonlinear_1se_metric <- score_regression(
+  y_train_nonlinear,
+  ridge_nonlinear_1se_prediction
+)
+
+ridge_nonlinear_training_errors <- tibble::tibble(
+  Tuning = c(
+    "lambda.min",
+    "lambda.1se"
+  ),
+  RMSE = c(
+    ridge_nonlinear_min_metric["RMSE"],
+    ridge_nonlinear_1se_metric["MAE"]
+  ),
+  MAE = c(
+    ridge_nonlinear_min_metric["RMSE"],
+    ridge_nonlinear_1se_metric["MAE"]
+  )
+)
+
+knitr::kable(
+  ridge_nonlinear_training_errors,
+  digits = 4,
+  caption = "Ridge Training Error"
+)
+
+cat('Cross-validation errors')
+
+ridge_nonlinear_cv_training_errors <- tibble::tibble(
+  Tunning = c(
+    "lambda.min",
+    "lambda.1se"
+  ),
+  Lambda = c(
+    ridge_nonlinear$lambda.min,
+    ridge_nonlinear$lambda.1se
+  ),
+  CV_MSE = c(
+    min(ridge_nonlinear$cvm),
+    ridge_nonlinear$cvm[
+      which.min(
+        abs(ridge_nonlinear$lambda - ridge_nonlinear$lambda.1se)
+      )
+    ]
+  )
+)
+
+knitr::kable(
+  ridge_nonlinear_cv_training_errors,
+  digits = 4,
+  caption = "Cross-validation errors for Ridge Regression"
+)
+
+cat('Coefficient Path:\n')
+
+plot(
+    ridge_nonlinear$glmnet.fit,
+    xvar = "lambda",
+    label = TRUE,
+    main = "Ridge Coefficient Paths"
+)
+
 ```
 
 ## 2C. Lasso
@@ -1135,6 +1712,341 @@ cat(
 ```{r lasso, eval=FALSE}
 # Use fit_cv_glmnet(..., alpha = 1, foldid = foldid).
 # Report lambda.min, lambda.1se, paths, and nonzero predictors.
+cat('2B.1 Multiple linear regression\n')
+
+lasso_linear <- fit_cv_glmnet(
+  x = x_train,
+  y = y_train,
+  alpha = 1,
+  foldid = foldid
+)
+
+cat('Cross-validation curve\n')
+
+plot(
+    lasso_linear,
+    main = "Five-fold Cross-validation Curve for Lasso Regression"
+)
+
+cat('Lambda.min and Lambda.1se\n')
+
+lasso_linear_lambda <- tibble::tibble(
+    tuning_rule = c(
+        "lambda.min",
+        "lambda.1se"
+    ),
+    lambda = c(
+        lasso_linear$lambda.min,
+        lasso_linear$lambda.1se
+    )
+)
+
+knitr::kable(
+    lasso_linear_lambda,
+    digits = 5,
+    caption = "Selected Lasso Penalties"
+)
+
+cat('Coefficients:\n')
+
+lasso_linear_coef_min <- tibble::tibble(
+  Variable = rownames(coef(lasso_linear, s = "lambda.min")),
+  Coefficient = as.numeric(
+    coef(lasso_linear, s = "lambda.min")
+  )
+)
+
+lasso_linear_coef_1se <- tibble::tibble(
+  Variable = rownames(coef(lasso_linear, s = "lambda.1se")),
+  Coefficient = as.numeric(
+    coef(lasso_linear, s = "lambda.1se")
+  )
+)
+
+knitr::kable(
+  lasso_linear_coef_min,
+  digits = 4,
+  caption = "Lasso Coefficients (lambda.min)"
+)
+
+knitr::kable(
+  lasso_linear_coef_1se,
+  digits = 4,
+  caption = "Lasso Coefficients (lambda.1se)"
+)
+
+lasso_linear_nonzero_coef_min <- rownames(coef(lasso_linear, s = "lambda.min"))[
+    as.numeric(coef(lasso_linear, s = "lambda.min")) != 0
+]
+
+lasso_linear_nonzero_coef_min <- setdiff(
+    lasso_linear_nonzero_coef_min,
+    "(Intercept)"
+)
+
+lasso_linear_nonzero_coef_1se <- rownames(coef(lasso_linear, s = "lambda.1se"))[
+    as.numeric(coef(lasso_linear, s = "lambda.1se")) != 0
+]
+
+lasso_linear_nonzero_coef_1se <- setdiff(
+    lasso_linear_nonzero_coef_1se,
+    "(Intercept)"
+)
+
+cat("\nNonzero predictors (lambda.min):\n")
+print(lasso_linear_nonzero_coef_min)
+
+cat("\nNonzero predictors (lambda.1se):\n")
+print(lasso_linear_nonzero_coef_1se)
+
+
+cat('Training errors:\n')
+
+lasso_linear_min_prediction <- predict(
+  lasso_linear,
+  newx = x_train,
+  s = "lambda.min"
+)
+
+lasso_linear_min_metric <- score_regression(
+  y_train,
+  lasso_linear_min_prediction
+)
+
+lasso_linear_1se_prediction <- predict(
+  lasso_linear,
+  newx = x_train,
+  s = "lambda.1se"
+)
+
+lasso_linear_1se_metric <- score_regression(
+  y_train,
+  lasso_linear_1se_prediction
+)
+
+lasso_linear_training_errors <- tibble::tibble(
+  Tuning = c(
+    "lambda.min",
+    "lambda.1se"
+  ),
+  RMSE = c(
+    lasso_linear_min_metric["RMSE"],
+    lasso_linear_1se_metric["RMSE"]
+  ),
+  MAE = c(
+    lasso_linear_min_metric["MAE"],
+    lasso_linear_1se_metric["MAE"]
+  )
+)
+
+knitr::kable(
+  lasso_linear_training_errors,
+  digits = 4,
+  caption = "Lasso Training Error"
+)
+
+cat('Cross-validation errors')
+
+lasso_linear_cv_training_errors <- tibble::tibble(
+  Tunning = c(
+    "lambda.min",
+    "lambda.1se"
+  ),
+  Lambda = c(
+    lasso_linear$lambda.min,
+    lasso_linear$lambda.1se
+  ),
+  CV_MSE = c(
+    min(lasso_linear$cvm),
+    lasso_linear$cvm[
+      which.min(
+        abs(lasso_linear$lambda - lasso_linear$lambda.1se)
+      )
+    ]
+  )
+)
+
+knitr::kable(
+  lasso_linear_cv_training_errors,
+  digits = 4,
+  caption = "Cross-validation errors for Lasso Regression"
+)
+
+cat('Coefficient Path:\n')
+
+plot(
+    lasso_linear$glmnet.fit,
+    xvar = "lambda",
+    label = TRUE,
+    main = "Lasso Coefficient Paths"
+)
+
+cat('2B.2 Polynomial linear regression\n')
+
+lasso_nonlinear <- fit_cv_glmnet(
+  x = x_train_nonlinear,
+  y = y_train_nonlinear,
+  alpha = 1,
+  foldid = foldid
+)
+
+cat('Cross-validation curve\n')
+
+plot(
+  lasso_nonlinear,
+  main = "Five-fold Cross-validation Curve for Lasso Polynomial Regression"
+)
+
+cat('Lambda.min and Lambda.1se\n')
+
+lasso_nonlinear_lambda <- tibble::tibble(
+  tunning_rule = c(
+    "lambda.min",
+    "lambda.1se"
+  ),
+  lambda = c(
+    lasso_nonlinear$lambda.min,
+    lasso_nonlinear$lambda.1se
+  )
+)
+
+knitr::kable(
+  lasso_nonlinear_lambda,
+  digits = 5,
+  caption = "Selected Lasso Penalties"
+)
+
+lasso_nonlinear_coef_min <- tibble::tibble(
+  Variable = rownames(coef(lasso_nonlinear, s = "lambda.min")),
+  Coefficient = as.numeric(
+    coef(lasso_nonlinear, s = "lambda.min")
+  )
+)
+
+lasso_nonlinear_coef_1se <- tibble::tibble(
+  Variable = rownames(coef(lasso_nonlinear, s = "lambda.1se")),
+  Coefficient = as.numeric(
+    coef(lasso_nonlinear, s = "lambda.1se")
+  )
+)
+
+knitr::kable(
+  lasso_nonlinear_coef_min,
+  digits = 4,
+  caption = "Lasso Coefficients (lambda.min)"
+)
+
+knitr::kable(
+  lasso_nonlinear_coef_1se,
+  digits = 4,
+  caption = "Lasso Coefficients (lambda.1se)"
+)
+
+lasso_nonlinear_nonzero_coef_min <- rownames(coef(lasso_nonlinear, s = "lambda.min"))[
+    as.numeric(coef(lasso_nonlinear, s = "lambda.min")) != 0
+]
+
+lasso_nonlinear_nonzero_coef_min <- setdiff(
+    lasso_nonlinear_nonzero_coef_min,
+    "(Intercept)"
+)
+
+lasso_nonlinear_nonzero_coef_1se <- rownames(coef(lasso_nonlinear, s = "lambda.1se"))[
+    as.numeric(coef(lasso_nonlinear, s = "lambda.1se")) != 0
+]
+
+lasso_nonlinear_nonzero_coef_1se <- setdiff(
+    lasso_nonlinear_nonzero_coef_1se,
+    "(Intercept)"
+)
+
+cat("\nNonzero predictors (lambda.min):\n")
+print(lasso_nonlinear_nonzero_coef_min)
+
+cat("\nNonzero predictors (lambda.1se):\n")
+print(lasso_nonlinear_nonzero_coef_1se)
+
+cat('Training errors:\n')
+
+lasso_nonlinear_min_prediction <- predict(
+  lasso_nonlinear,
+  newx = x_train_nonlinear,
+  s = "lambda.min"
+)
+
+lasso_nonlinear_min_metric <- score_regression(
+  y_train,
+  lasso_linear_min_prediction
+)
+
+lasso_nonlinear_1se_prediction <- predict(
+  lasso_nonlinear,
+  newx = x_train_nonlinear,
+  s = "lambda.1se"
+)
+
+lasso_nonlinear_1se_metric <- score_regression(
+  y_train_nonlinear,
+  lasso_nonlinear_1se_prediction
+)
+
+lasso_nonlinear_training_errors <- tibble::tibble(
+  Tuning = c(
+    "lambda.min",
+    "lambda.1se"
+  ),
+  RMSE = c(
+    lasso_nonlinear_min_metric["RMSE"],
+    lasso_nonlinear_1se_metric["RMSE"]
+  ),
+  MAE = c(
+    lasso_nonlinear_min_metric["MAE"],
+    lasso_nonlinear_1se_metric["MAE"]
+  )
+)
+
+knitr::kable(
+  lasso_nonlinear_training_errors,
+  digits = 4,
+  caption = "Lasso Training Error"
+)
+
+cat('Cross-validation errors')
+
+lasso_nonlinear_cv_training_errors <- tibble::tibble(
+  Tunning = c(
+    "lambda.min",
+    "lambda.1se"
+  ),
+  Lambda = c(
+    lasso_nonlinear$lambda.min,
+    lasso_nonlinear$lambda.1se
+  ),
+  CV_MSE = c(
+    min(lasso_nonlinear$cvm),
+    lasso_nonlinear$cvm[
+      which.min(
+        abs(lasso_nonlinear$lambda - lasso_nonlinear$lambda.1se)
+      )
+    ]
+  )
+)
+
+knitr::kable(
+  lasso_nonlinear_cv_training_errors,
+  digits = 4,
+  caption = "Cross-validation errors for Lasso Regression"
+)
+
+cat('Coefficient Path:\n')
+
+plot(
+    lasso_nonlinear$glmnet.fit,
+    xvar = "lambda",
+    label = TRUE,
+    main = "Lasso Coefficient Paths"
+)
+
 ```
 
 ## 2D. Training-based comparison and locked core model
@@ -1181,7 +2093,7 @@ cat(
 **Research direction:** [weight decay / sparse weights / pruning / dropout]
 
 | Claim | Exact primary source and locator | What it establishes | What it does not establish |
-|---|---|---|---|
+|------------------|------------------|------------------|------------------|
 | [Claim] | [Citation, section/page/equation] | [Support] | [Boundary] |
 
 ## 4B. Elastic net on original predictors
@@ -1229,7 +2141,7 @@ M <- 200L
 
 ## 5A. Reproduction record
 
-```text
+``` text
 1. Open a clean R session.
 2. [Exact commands and folder layout.]
 3. Render Group02_ProjectQuiz1.Rmd.
@@ -1242,10 +2154,10 @@ M <- 200L
 ## 5C. AI verification record
 
 | AI-assisted item | How it was checked | Evidence | Modification or rejection |
-|---|---|---|---|
+|------------------|------------------|------------------|------------------|
 | [Item] | [Method] | [Test/source/output] | [Decision] |
 
-# Preflight and session information {-}
+# Preflight and session information {.unnumbered}
 
 ```{r preflight, eval=FALSE}
 # Add every object required to reproduce the final table and figures.
