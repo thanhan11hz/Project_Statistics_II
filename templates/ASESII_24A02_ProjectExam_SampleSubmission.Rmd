@@ -394,7 +394,7 @@ ols_stepwise_regression(x_train_nonlinear, y_train_nonlinear)
 
 ### $L_2$ regularization and direct weight decay
 
-$L_2$ regularization and weight decay are often treated as the same method because both reduce the magnitude of model parameters. However, their equivalence depends on the optimization algorithm.
+$L_2$ regularization is usually treated as equivalent to weight decay because both reduce the magnitude of model parameters. However, there is a difference in their nature, so this equivalence does not always hold.
 
 Let $f_t(\boldsymbol{\theta})$ denote the loss on the mini-batch used at iteration $t$. Adding an $L_2$ penalty gives the regularized objective
 
@@ -409,24 +409,11 @@ f_t(\boldsymbol{\theta})
 \right\|_2^2.
 $$
 
-Under standard stochastic gradient descent with learning rate $\alpha$, the resulting update is
+Under standard stochastic gradient (SGD) descent with learning rate $\alpha$, the resulting update is
 
 $$
 \begin{aligned}
 \boldsymbol{\theta}_{t+1}
-&=
-\boldsymbol{\theta}_t
--
-\alpha
-\nabla f_t^{\mathrm{reg}}
-(\boldsymbol{\theta}_t) \\
-&=
-\boldsymbol{\theta}_t
--
-\alpha
-\nabla f_t(\boldsymbol{\theta}_t)
--
-\alpha\lambda_{L2}\boldsymbol{\theta}_t \\
 &=
 \left(
 1-\alpha\lambda_{L2}
@@ -460,11 +447,12 @@ $$
 \alpha\lambda_{L2}.
 $$
 
-Thus, $L_2$ regularization and direct weight decay are equivalent under standard SGD only after their coefficients are appropriately rescaled by the learning rate [@loshchilov2019].
+
+Thus, with standard SGD, $L_2$ regularization and weight decay are equivalent only when the $L_2$ coefficient is appropriately scaled by the learning rate [@loshchilov2019].
 
 ### Why the equivalence fails for adaptive optimizers
 
-The equivalence generally fails when the optimizer scales different parameter directions differently. Let $M_t$ denote the preconditioning matrix used by an adaptive optimizer. Applying an $L_2$ penalty gives
+The equivalence generally fails when different parameters are scaled differently. Let $M_t$ denote the preconditioning matrix used by an adaptive optimizer. Applying an $L_2$ penalty gives
 
 $$
 \boldsymbol{\theta}_{t+1}
@@ -492,47 +480,51 @@ $$
 \nabla f_t(\boldsymbol{\theta}_t).
 $$
 
-With $L_2$ regularization, the penalty gradient is transformed by the same adaptive preconditioner as the data-loss gradient. With decoupled weight decay, the shrinkage is applied directly and separately. Unless $M_t$ is a scalar multiple of the identity matrix, no single $L_2$ coefficient can make the two updates equivalent for all parameters [@loshchilov2019].
+With $L_2$ regularization, the penalty gradient is transformed by the same adaptive preconditioner as the data-loss gradient, while the direct weight decay applies the shrinkage directly and separately. Unless $M_t = kI$ for some $k \in \mathbb{R}$, no single $L_2$ coefficient can make the two updates equivalent for all parameters [@loshchilov2019].
 
 This distinction motivated AdamW, which separates weight decay from Adam's adaptive gradient calculation. In the image-classification experiments reported by Loshchilov and Hutter, AdamW produced better generalization than Adam with an ordinary $L_2$ penalty and also made the learning-rate and weight-decay hyperparameters easier to tune independently [@loshchilov2019].
 
 ### How weight decay can regularize neural networks
 
-Zhang et al. investigated weight decay using SGD, Adam, and K-FAC across several neural-network architectures. They concluded that weight decay does not operate through one universal mechanism. Instead, its effect depends on both the optimizer and the architecture [@zhang2018mechanisms]. One of the mechanism is increasing the effective learning rate.
+Zhang et al. investigated weight decay using SGD, Adam, and K-FAC across several neural-network architectures. They concluded that weight decay does not operate through one universal mechanism. Instead, its effect depends on both the optimizer and the architecture [@zhang2018]. One of the mechanisms is increasing the effective learning rate.
 
 For layers followed by Batch Normalization, multiplying the weights by a positive constant does not change the represented network function:
 
 $$
-\mathrm{BN}(x;\alpha\boldsymbol{\theta}_l)
+\mathrm{BN}(x;\eta\boldsymbol{\theta}_l)
 =
 \mathrm{BN}(x;\boldsymbol{\theta}_l),
-\qquad \alpha>0.
+\qquad \eta>0.
 $$
 
-Consequently, reducing the norm of these weights does not meaningfully restrict the set of functions that the network can represent. Nevertheless, weight decay can still improve generalization.
+Consequently,  rescaling the norm of these weights does not meaningfully constrain the reprsentation. Nevertheless, weight decay can still improve generalization.
 
 For a scale-invariant weight vector, the approximate effective learning rate for its direction is proportional to
 
 $$
-\frac{\eta}
+\frac{\alpha}
 {\left\|
-\boldsymbol{\theta}_l
-\right\|_2^2},
+\boldsymbol{\theta}
+\right\|_2^2}.
 $$
 
-where $\eta$ is the nominal learning rate. By reducing the weight norm, weight decay increases the effective learning rate. This may strengthen the regularizing effect of stochastic gradient noise.
+By reducing the weight norm, weight decay increases the effective learning rate. This may strengthen the regularizing effect of stochastic gradient noise.
 
-Zhang et al. found that, for Batch-Normalized networks trained with SGD or Adam, most of the generalization improvement came from applying weight decay to the normalized convolutional layers rather than only to the final unnormalized layer. They also reproduced almost the full effect of weight decay by matching the weight norms, and therefore the effective learning-rate schedule, in a network trained without weight decay [@zhang2018mechanisms].
+Zhang et al. found that, for Batch-Normalized networks trained with SGD or Adam, most of the generalization improvement came from applying weight decay to the normalized convolutional layers rather than only to the final unnormalized layer. They also reproduced almost the full effect of weight decay by matching the weight norms, and therefore the effective learning-rate schedule, in a network trained without weight decay [@zhang2018].
 
 ### Source Map
 
 | Claim | Exact primary source and locator | What it establishes | What it does not establish |
 |---|---|---|---|
-| Under standard SGD, an $L_2$ penalty and direct weight decay generate identical updates after rescaling the coefficients by the learning rate. | Loshchilov and Hutter, Section 2, p. 2, Equation (1) and Proposition 1; Appendix A, p. 12, Equations (5)--(6). | It algebraically establishes equivalence when $\lambda_{WD}=\alpha\lambda_{L2}$. | It does not establish equivalence when the coefficients are not rescaled or when the optimizer uses nonuniform adaptive preconditioning. |
-| For adaptive gradient methods, an ordinary $L_2$ penalty is generally not equivalent to direct weight decay. | Loshchilov and Hutter, Section 2, pp. 2--3, Algorithm 2 and Proposition 2; Appendix A, p. 12, Equations (7)--(8). | It shows that adaptive optimization also transforms the $L_2$ penalty gradient, whereas decoupled weight decay shrinks parameters separately from the adaptive gradient update. | It does not imply that AdamW must outperform Adam for every task, dataset, architecture, or hyperparameter configuration. |
-| AdamW improved generalization and made the learning-rate and weight-decay hyperparameters more separable in the reported experiments. | Loshchilov and Hutter, Section 4.1, pp. 5--6, Figures 1--2; Sections 4.2--4.3, pp. 6--8, Figure 3. | It provides empirical evidence on ResNets trained on CIFAR-10 and ImageNet32x32 under several learning-rate schedules and training budgets. | It does not establish universal superiority beyond the tested image-classification settings. |
-| The regularization effect of weight decay depends on the optimizer and network architecture rather than following one universal mechanism. | Zhang et al., Abstract and Introduction, pp. 1--2; Section 5, p. 9. | The study identifies three mechanisms: increasing effective learning rate, approximately reducing the input-output Jacobian norm, and reducing effective damping in second-order optimization. | It does not establish that these are the only possible mechanisms or that each mechanism applies to every neural network. |
-| In Batch-Normalized networks trained with SGD or Adam, weight decay acts primarily by increasing the effective learning rate. | Zhang et al., Section 4.1, pp. 5--6, Equations (8)--(9), Figures 2--4. | Because Batch-Normalized layers are scale-invariant, decreasing the weight norm raises the effective learning rate. Matching the weight norms reproduced almost the entire observed generalization effect. | It does not show that the same explanation applies to networks without normalization or to optimizers whose updates are invariant to parameter rescaling. |
+| Under standard SGD, an $L_2$ penalty and direct weight decay generate identical updates after rescaling the coefficients by the learning rate. | [@loshchilov2019], Section 2, Equation (1) and Proposition 1. | It algebraically establishes equivalence when $\lambda_{WD}=\alpha\lambda_{L2}$. | It does not establish equivalence when the coefficients are not rescaled or when the optimizer uses nonuniform adaptive preconditioning. |
+| For adaptive gradient methods, an ordinary $L_2$ penalty is generally not equivalent to direct weight decay. | [@loshchilov2019], Section 2, Algorithm 2 and Proposition 2. | It shows that adaptive optimization also transforms the $L_2$ penalty gradient, whereas decoupled weight decay shrinks parameters separately from the adaptive gradient update. | It does not imply that AdamW must outperform Adam for every task, dataset, architecture, or hyperparameter configuration. |
+| AdamW improved generalization and made the learning-rate and weight-decay hyperparameters more separable in the reported experiments. | [@loshchilov2019], Section 4.1--4.3. | It provides empirical evidence on ResNets trained on CIFAR-10 and ImageNet32x32 under several learning-rate schedules and training budgets. | It does not establish universal superiority beyond the tested image-classification settings. |
+| The regularization effect of weight decay depends on the optimizer and network architecture rather than following one universal mechanism. | [@zhang2018], Abstract and Introduction.| The study identifies three mechanisms: increasing effective learning rate, approximately reducing the input-output Jacobian norm, and reducing effective damping in second-order optimization. | It does not establish that these are the only possible mechanisms or that each mechanism applies to every neural network. |
+| In Batch-Normalized networks trained with SGD or Adam, weight decay acts primarily by increasing the effective learning rate. | [@zhang2018], Section 4.1. | Because Batch-Normalized layers are scale-invariant, decreasing the weight norm raises the effective learning rate. Matching the weight norms reproduced almost the entire observed generalization effect. | It does not show that the same explanation applies to networks without normalization or to optimizers whose updates are invariant to parameter rescaling. |
+| Dropout is a stochastic regularization method that temporarily removes randomly selected units and their incoming and outgoing connections during training. | [@srivastava2014dropout], Section 1. | The paper defines dropout as randomly and temporarily dropping units and their connections during training. Each training case therefore uses a sampled "thinned" network. | The source does not establish that the dropped units or connections are permanently removed from the trained model. | 
+| Magnitude-based network pruning permanently removes connections whose weights fall below a selected threshold and then retrains the remaining sparse connections. | [@han2016deep], Section 2. | The paper describes a three-step pruning procedure: train the original network, remove small-weight connections below a threshold, and retrain the remaining sparse network. | The source does not establish that every pruning rule, threshold, architecture, or data set will preserve predictive accuracy. |
+| A multilayer neural network can use backpropagation to adjust connection weights in the output and successively earlier hidden layers, enabling hidden units to learn representations relevant to the task. | [@Rumelhart1986LearningRB], Abstract; p. 534, description of the backward pass; p. 535, Eq. (8) and the paragraph immediately preceding it. | The paper establishes that errors can be propagated backward through a multilayer network to adjust the weights and learn internal representations. | It does not establish which regularization method, such as Ridge, Lasso, or Elastic Net, performs best in all deep-network architectures or tasks. |
+
 
 ## 4B. Elastic net on original predictors
 
@@ -834,7 +826,7 @@ Applying an \(L_2\) penalty to the learned output weights gives the objective
 
 where \(H\) is the fixed ReLU feature matrix. This is exactly a Ridge-regression objective on the hidden features because the squared output weights are added directly to the squared-error loss.
 
-However, this interpretation should not be generalized without qualification to weight decay in a fully trained neural network. Under standard gradient descent, adding an \(L_2\) term to the loss can produce the same parameter updates as multiplicative weight decay after the regularization coefficient is appropriately rescaled by the learning rate. For adaptive optimizers such as Adam, the equivalence generally fails because the gradient of the \(L_2\) term is scaled by the optimizer's parameter-specific adaptive factors. Decoupled weight decay instead shrinks the parameters separately from the adaptive loss-gradient update [@loshchilov2019decoupled]. Thus, the \(L_2\) penalty used in this experiment is a ridge penalty on the output weights, but it should not automatically be treated as identical to decoupled weight decay in adaptive neural-network optimization.
+For adaptive optimizers, the gradient of the \(L_2\) term is scaled by the optimizer's parameter-specific adaptive factors. Direct weight decay instead shrinks the parameters separately from the adaptive loss-gradient update [@loshchilov2019]. Thus, the \(L_2\) penalty used in this experiment is a Ridge penalty on the output weights, but in adaptive neural-network optimization, it is not always identical to weight decay.
 
 ### Zero output weights and feature sparsity
 
@@ -846,7 +838,7 @@ b_m=0,
 
 then the corresponding term \(b_mh_m(x)\) contributes zero to every prediction. In that sense, the \(m\)-th fixed hidden feature is removed from this scalar predictor.
 
-Nevertheless, this does not create sparsity in the input-to-hidden parameters. The vector \(a_m\), which defines how the original predictors are combined before the ReLU transformation, remains unchanged and may still contain nonzero entries for every original predictor. Therefore, lasso or elastic net can produce sparsity among the learned output weights, but this experiment does not produce sparse input-to-hidden connections.
+Nevertheless, this does not create sparsity in the input-to-hidden parameters. The vector \(a_m\), which defines how the original predictors are combined before the ReLU transformation, remains unchanged and may still contain nonzero entries for every original predictor. Therefore, Lasso or Elastic net can produce sparsity among the learned output weights, but this experiment does not produce sparse input-to-hidden connections.
 
 ### Dropout and permanent pruning
 
@@ -858,7 +850,8 @@ Permanent pruning is different because selected weights, connections, or units a
 
 This experiment contains only one random hidden layer. The input-to-hidden weights and hidden biases were sampled once and frozen, while only the linear output layer was trained. It is therefore better interpreted as regularized regression on a fixed nonlinear representation than as a fully trained neural network.
 
-In an end-to-end neural network, the hidden representations are learned jointly with the output layer, and changes in earlier layers alter the inputs received by later layers. Multilayer networks also involve interactions among several trainable representations and a non-convex optimization problem. Consequently, the present results show how Ridge, Lasso, and Elastic net behave on fixed ReLU features, but they do not establish which regularization method would perform best in a fully trained deep network.
+A multilayer neural network can use backpropagation to adjust connection weights in the output and successively earlier hidden layers, enabling hidden units to learn representations relevant to the task [@Rumelhart1986LearningRB]. Consequently, the present results do not establish which regularization method would perform best in a fully trained deep network.
+
 
 ### Limitations
 
@@ -866,7 +859,8 @@ First, the results are sensitive to the random-feature seed. A different seed wo
 
 Second, the hidden representation was not learned from the response. Random ReLU features may capture useful nonlinear structure, but they are not optimized for this specific prediction task. A fully trained network could adapt its hidden weights and biases to construct a more task-relevant representation.
 
-Third, the choice \(M=200\) was fixed rather than tuned. A smaller value of \(M\) might provide insufficient nonlinear flexibility, whereas a larger value could increase computational cost and model variance. Therefore, the conclusions may depend on the selected number of hidden features.
+Third, the choice \(M=200\) was fixed rather than tuned. A small value of \(M\) might provide insufficient nonlinear flexibility, whereas a large value could increase computational cost and model variance. Therefore, the conclusions may depend on the selected number of hidden features.
+
 
 # Problem 5. Report quality and reproducibility
 
@@ -886,8 +880,8 @@ Third, the choice \(M=200\) was fixed rather than tuned. A smaller value of \(M\
 
 | AI-assisted item | How it was checked | Evidence | Modification or rejection |
 |---|---|---|---|
-| [Item] | [Method] | [Test/source/output] | [Decision] |
-
+| Drafting the source map for dropout and network pruning | Each claim was checked against the original research papers and the cited section, page, or figure. | Srivastava et al. (2014), Section 1; Han et al. (2016), Section 2. | The wording was revised to avoid claims beyond the sources. |
+| Explaining the difference between $L_2$ regularization and weight decay | The explanation and equations were compared with the propositions and algorithms in the original paper. | Loshchilov and Hutter (2019), Section 2. | Overgeneralized statements were rejected. |
 # Preflight and session information {-}
 
 ```{r preflight, eval=FALSE}
